@@ -1,0 +1,39 @@
+
+#ifndef __FPROTO_SUBCARTYPES_H__
+#define __FPROTO_SUBCARTYPES_H__
+
+enum FPROTO_SUBCAR_SENSOR : uint8_t {
+    FPC_Invalid = 0,
+    FPC_SUZUKI = 1,
+    FPC_VW = 2,
+    FPC_SUBARU = 3,
+    FPC_KIAV5 = 4,
+    FPC_KIAV3V4 = 5,
+    FPC_KIAV2 = 6,
+    FPC_KIAV1 = 7,
+    FPC_KIAV0 = 8,
+    FPC_FORDV0 = 9,
+    FPC_FIATV0 = 10,
+    FPC_BMWV0 = 11,
+    FPC_HONDA = 14,
+    FPC_FORDV1 = 15,
+    FPC_MAZDAV0 = 16,
+    FPC_MITSUBISHIV0 = 17,
+    FPC_KIAV7 = 18,
+    FPC_FIATV1 = 19,
+    FPC_PORSCHEV0 = 20,
+    FPC_CHRYSLERV0 = 21,
+    FPC_BMWCAS4 = 22,
+    FPC_HYUNDAIKIA_V0 = 23,
+    FPC_HYUNDAISANTAFEV0 = 24,
+    FPC_FORDV2 = 25,
+    FPC_FORDV3 = 26,
+    FPC_LAND_ROVER_V0 = 27,
+    FPC_PSA = 28,
+    FPC_SCHER_KHAN = 29,
+    FPC_STAR_LINE = 30,
+    FPC_HONDA_STATIC = 31,
+    FPC_COUNT
+};
+
+#endif

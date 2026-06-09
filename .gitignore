@@ -1,0 +1,51 @@
+# Mayhem firmware (clone separately: git clone --branch v2.4.0 https://github.com/portapack-mayhem/mayhem-firmware)
+mayhem-firmware-2.4.0/
+
+# Old sync mirror (replaced by src/)
+wsl_mirror/
+
+# Build output (large binaries, compiled firmware)
+Build/
+*.bin
+*.tar.gz
+*.7z
+
+# Pre-built releases ARE tracked (small .ppma files for end users)
+!releases/
+!releases/*.ppma
+!releases/*.ppmp
+
+# Dev scratch / iteration dirs
+step*/
+protopirate/
+unleashed_protocols/
+f7-update-*/
+*.zip
+
+# IDE / OS
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Planning / session / scratch docs
+SESSION_SUMMARY_*.md
+*_PLAN.md
+*_STRATEGY.md
+*_SUMMARY*.md
+*_COMPLETE.md
+PHASE_*.md
+TIER_*.md
+QUANTUM_*.md
+QUICK_START_GUIDE.md
+ENCODER_*.md
+subghz_porting_plan.md
+PROJECT_INDEX.md
+debug.txt
+*.bat
+*.elf
+*.txt
+*.py
+build_subghztx.sh
+build_subcar.sh
