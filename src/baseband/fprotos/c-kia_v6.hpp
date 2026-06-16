@@ -171,7 +171,7 @@ class FProtoSubCarKiaV6 : public FProtoSubCarBase {
                 // kia_v6_decrypt(); --won't
                 decode_data = data_part1_low | ((uint64_t)data_part1_high << 32);
                 if (callback) {
-                    callback(this);
+                    fire_callback();
                 }
 
                 data_part1_low = 0;

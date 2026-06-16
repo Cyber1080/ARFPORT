@@ -59,7 +59,7 @@ void SubCarProcessor::execute(const buffer_c8_t& buffer) {
                     low_estimate += ook_low_delta / OOK_EST_LOW_RATIO;
                     low_estimate += ((ook_low_delta > 0) ? 1 : -1);  // Hack to compensate for lack of fixed-point scaling
                     // Calculate default OOK high level estimate
-                    high_estimate = 1.35 * low_estimate;  // Default is a ratio of low level
+                    high_estimate = low_estimate + (low_estimate * 35) / 100;  // 1.35x, integer only (no VFP on M0)
                     high_estimate = std::max(high_estimate, min_high_level);
                     high_estimate = std::min(high_estimate, (uint32_t)OOK_MAX_HIGH_LEVEL);
                 }
@@ -108,7 +108,7 @@ void SubCarProcessor::execute(const buffer_c8_t& buffer) {
                 currentDuration += nsPerDecSamp;
             } else {  // called on change, so send the last duration and dir.
                 if (currentDuration >= 30'000'000) sig_state = STATE_IDLE;
-                if (protoList) protoList->feed(currentHiLow, currentDuration / 1000);
+                protoList.feed(currentHiLow, currentDuration / 1000);
                 currentDuration = nsPerDecSamp;
                 currentHiLow = meashl;
             }
@@ -133,7 +133,7 @@ void SubCarProcessor::execute(const buffer_c8_t& buffer) {
                 } else {
                     int32_t duration_us = (fm_state.buffer_count * nsPerDecSamp) / 1000;
                     if (duration_us > 15) {
-                        if (protoList) protoList->feed(fm_state.current_logic_level, duration_us);
+                        protoList.feed(fm_state.current_logic_level, duration_us);
                     }
                     fm_state.current_logic_level = new_level;
                     fm_state.buffer_count = 1;
@@ -154,13 +154,8 @@ void SubCarProcessor::configure(const SubGhzFPRxConfigureMessage& message) {
     // constexpr size_t decim_0_output_fs = baseband_fs / decim_0.decimation_factor; //unused
     // constexpr size_t decim_1_output_fs = decim_0_output_fs / decim_1.decimation_factor; //unused
 
-    if (modulation != message.modulation) {
-        // reload protos to reset them all
-        if (protoList) {
-            delete protoList;
-        }
-        protoList = new SubCarProtos();
-    }
+    // Note: protocol parsers work the same for AM and FM — both receive (level, duration)
+    // from the respective demod path. No need to recreate them on modulation change.
     modulation = message.modulation;
     baseband_fs = message.sampling_rate;
     baseband_thread.set_sampling_rate(baseband_fs);
@@ -174,6 +169,7 @@ void SubCarProcessor::configure(const SubGhzFPRxConfigureMessage& message) {
 
 int main() {
     EventDispatcher event_dispatcher{std::make_unique<SubCarProcessor>()};
+    shared_memory.set_baseband_ready();  // DIAG: fires only if construction survives
     event_dispatcher.run();
     return 0;
 }

@@ -307,7 +307,7 @@ class FProtoSubCarPSA : public FProtoSubCarBase {
         decode_data = ((uint64_t)key1_high << 32) | key1_low;
         decode_data2 = (uint64_t)(key2_low & 0xFFFF);
         data_count_bit = 128;
-        if(callback) callback(this);
+        if(callback) fire_callback();
         decode_data_low = 0;
         decode_data_high = 0;
         decode_count_local = 0;

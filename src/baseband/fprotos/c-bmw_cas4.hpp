@@ -92,7 +92,7 @@ class FProtoSubCarBmwCas4 : public FProtoSubCarBase {
                                 for (int i = 0; i < 8; i++)
                                     decode_data = (decode_data << 8) | raw_bytes[i];
                                 data_count_bit = BMW_CAS4_DATA_BITS;
-                                if (callback) callback(this);
+                                if (callback) fire_callback();
                             }
                             parser_step = BmwCas4StepReset;
                         }

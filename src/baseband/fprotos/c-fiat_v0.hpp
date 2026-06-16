@@ -173,7 +173,7 @@ class FProtoSubCarFiatV0 : public FProtoSubCarBase {
                             decode_data2 = endbyte;
                             data_count_bit = 64;
                             if (callback) {
-                                callback(this);
+                                fire_callback();
                             }
 
                             data_low = 0;

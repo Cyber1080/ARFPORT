@@ -1,0 +1,1962 @@
+diff --git a/firmware/application/CMakeLists.txt b/firmware/application/CMakeLists.txt
+index 018fa46c..1ea74242 100644
+--- a/firmware/application/CMakeLists.txt
++++ b/firmware/application/CMakeLists.txt
+@@ -284,6 +284,7 @@ set(CPPSRC
+ 	apps/ble_rx_app.cpp
+ 	apps/ble_tx_app.cpp
+ 	apps/capture_app.cpp
++	apps/ui_subcar.cpp
+ 	apps/pocsag_app.cpp
+ 	apps/ui_about_simple.cpp
+ 	apps/ui_adsb_rx.cpp
+@@ -314,6 +315,7 @@ set(CPPSRC
+ 	apps/ui_ss_viewer.cpp
+ 	apps/ui_standalone_view.cpp
+ 	apps/ui_subghzd.cpp
++    apps/ui_subghzd_hopper.cpp
+ 	# apps/ui_test.cpp
+ 	apps/ui_text_editor.cpp
+ 	apps/ui_touch_calibration.cpp
+diff --git a/firmware/application/apps/ui_subcar.cpp b/firmware/application/apps/ui_subcar.cpp
+new file mode 100644
+index 00000000..db0ffa56
+--- /dev/null
++++ b/firmware/application/apps/ui_subcar.cpp
+@@ -0,0 +1,660 @@
++/*
++ * Copyright (C) 2026 HTotoo
++ *
++ * This file is part of PortaPack.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; see the file COPYING.  If not, write to
++ * the Free Software Foundation, Inc., 51 Franklin Street,
++ * Boston, MA 02110-1301, USA.
++ */
++
++#include "ui_subcar.hpp"
++#include "audio.hpp"
++#include "baseband_api.hpp"
++#include "string_format.hpp"
++#include "file_path.hpp"
++#include "portapack_persistent_memory.hpp"
++
++using namespace portapack;
++using namespace ui;
++
++#pragma GCC optimize("Os")  // MEASURE: size-optimize the M4 UI code to fit the 32KB region
++
++namespace ui::subcarrx {
++
++std::string SubCarRecentEntry::to_csv() {
++    std::string csv = ";";
++    csv += SubCarView::getSensorTypeName((FPROTO_SUBCAR_SENSOR)sensorType);
++    csv += ";" + to_string_dec_uint(bits) + ";";
++    csv += to_string_hex(data, 64 / 4) + ";" + to_string_hex(data2, 64 / 4);
++    return csv;
++}
++
++void SubCarLogger::log_data(SubCarRecentEntry& data) {
++    log_file.write_entry(data.to_csv());
++}
++
++void SubCarRecentEntryDetailView::update_data() {
++    // process protocol data
++    parseProtocol();
++    // set text elements
++    text_type.set(SubCarView::getSensorTypeName((FPROTO_SUBCAR_SENSOR)entry_.sensorType));
++
++    text_id.set("0x" + to_string_hex(serial));
++    if (entry_.bits > 0) console.writeln("Bits: " + to_string_dec_uint(entry_.bits));
++    if (!btn.empty()) console.writeln("Btn: " + btn);
++    if (cnt != SD_NO_CNT) console.writeln("Cnt: " + to_string_dec_uint(cnt));
++    if (entry_.data != 0) console.writeln("Data : " + to_string_hex(entry_.data));
++    if (entry_.data2 != 0) console.writeln("Data2: " + to_string_hex(entry_.data2));
++}
++
++SubCarRecentEntryDetailView::SubCarRecentEntryDetailView(NavigationView& nav, const SubCarRecentEntry& entry)
++    : nav_{nav},
++      entry_{entry} {
++    add_children({&button_done,
++                  &text_type,
++                  &text_id,
++                  &console,
++                  &labels});
++
++    button_done.on_select = [&nav](const ui::Button&) {
++        nav.pop();
++    };
++    update_data();
++}
++
++void SubCarRecentEntryDetailView::focus() {
++    button_done.focus();
++}
++
++void SubCarView::focus() {
++    field_frequency.focus();
++}
++
++SubCarView::SubCarView(NavigationView& nav)
++    : nav_{nav} {
++    add_children({&rssi,
++                  &channel,
++                  &field_rf_amp,
++                  &field_lna,
++                  &field_vga,
++                  &field_frequency,
++                  &button_clear_list,
++                  &check_log,
++                  &labels,
++                  &options_mode,
++                  &recent_entries_view});
++
++    baseband::run_image(portapack::spi_flash::image_tag_subcar);
++    logger = std::make_unique<SubCarLogger>();
++
++    button_clear_list.on_select = [this](Button&) {
++        recent.clear();
++        recent_entries_view.set_dirty();
++    };
++    field_frequency.set_step(10000);
++    check_log.on_select = [this](Checkbox&, bool v) {
++        logging = v;
++        if (logger && logging) {
++            logger->append(logs_dir.string() + "/SubCarLOG_" + to_string_timestamp(rtc_time::now()) + ".CSV");
++            logger->write_header();
++        }
++    };
++    check_log.set_value(logging);
++    const Rect content_rect{0, header_height, screen_width, screen_height - header_height};
++    recent_entries_view.set_parent_rect(content_rect);
++    recent_entries_view.on_select = [this](const SubCarRecentEntry& entry) {
++        nav_.push<SubCarRecentEntryDetailView>(entry);
++    };
++
++    options_mode.on_change = [this](size_t, int32_t v) {
++        modulation = v;
++        chThdSleepMilliseconds(100);  // wait for the baseband thread to process the previous config, to avoid glitchy output when switching modes
++        baseband::set_subghzd_config(modulation, receiver_model.sampling_rate());
++    };
++    signal_token_tick_second = rtc_time::signal_tick_second += [this]() {
++        on_tick_second();
++    };
++    options_mode.set_selected_index(modulation, true);
++    receiver_model.enable();
++}
++
++void SubCarView::on_tick_second() {
++    for (auto& entry : recent) {
++        entry.inc_age(1);
++    }
++    recent_entries_view.set_dirty();
++}
++
++void SubCarView::on_data(const SubCarDataMessage* data) {
++    SubCarRecentEntry key{data->sensorType, data->data, data->data2, data->bits};
++    if (logger && logging) {
++        logger->log_data(key);
++    }
++    auto matching_recent = find(recent, key.key());
++    if (matching_recent != std::end(recent)) {
++        // Found within. Move to front of list, increment counter.
++        (*matching_recent).reset_age();
++        recent.push_front(*matching_recent);
++        recent.erase(matching_recent);
++    } else {
++        recent.emplace_front(key);
++        truncate_entries(recent, 64);
++    }
++    recent_entries_view.set_dirty();
++}
++
++SubCarView::~SubCarView() {
++    rtc_time::signal_tick_second -= signal_token_tick_second;
++    receiver_model.disable();
++    baseband::shutdown();
++}
++
++const char* SubCarView::getSensorTypeName(FPROTO_SUBCAR_SENSOR type) {
++    switch (type) {
++        case FPC_SUZUKI:
++            return "Suzuki";
++        case FPC_VW:
++            return "VW";
++        case FPC_SUBARU:
++            return "Subaru";
++        case FPC_KIAV5:
++            return "Kia V5";
++        case FPC_KIAV3V4:
++            return "Kia V3/V4";
++        case FPC_KIAV2:
++            return "Kia V2";
++        case FPC_KIAV1:
++            return "Kia V1";
++        case FPC_KIAV0:
++            return "Kia V0";
++        case FPC_FORDV0:
++            return "Ford V0";
++        case FPC_FIATV0:
++            return "Fiat V0";
++        case FPC_BMWV0:
++            return "BMW V0";
++        case FPC_HONDA:
++            return "Honda";
++        case FPC_FORDV1:
++            return "Ford V1";
++        case FPC_MAZDAV0:
++            return "Mazda V0";
++        case FPC_MITSUBISHIV0:
++            return "Mitsubishi V0";
++        case FPC_KIAV7:
++            return "Kia V7";
++        case FPC_FIATV1:
++            return "Fiat V1";
++        case FPC_PORSCHEV0:
++            return "Porsche V0";
++        case FPC_CHRYSLERV0:
++            return "Chrysler V0";
++        case FPC_BMWCAS4:
++            return "BMW CAS4";
++        case FPC_HYUNDAIKIA_V0:
++            return "Hyundai/Kia V0";
++        case FPC_HYUNDAISANTAFEV0:
++            return "Hyundai SFe V0";
++        case FPC_FORDV2:
++            return "Ford V2";
++        case FPC_FORDV3:
++            return "Ford V3";
++        case FPC_LAND_ROVER_V0:
++            return "Land Rover V0";
++        case FPC_PSA:
++            return "PSA Group";
++        case FPC_SCHER_KHAN:
++            return "Scher-Khan";
++        case FPC_STAR_LINE:
++            return "Star Line";
++        case FPC_HONDA_STATIC:
++            return "Honda Static";
++            /* case FPC_KIAV6:
++                 return "Kia V6";*/
++
++        case FPC_Invalid:
++        default:
++            return "Unknown";
++    }
++}
++
++std::string SubCarView::pad_string_with_spaces(int snakes) {
++    if (snakes <= 0) return std::string();  // guard: negative/underflow would allocate a huge string and crash
++    return std::string(snakes, ' ');
++}
++
++void SubCarView::on_freqchg(int64_t freq) {
++    field_frequency.set_value(freq);
++}
++
++void subaru_decode_count(const uint8_t* KB, uint16_t* count) {
++    uint8_t lo = 0;
++    if ((KB[4] & 0x40) == 0)
++        lo |= 0x01;
++    if ((KB[4] & 0x80) == 0)
++        lo |= 0x02;
++    if ((KB[5] & 0x01) == 0)
++        lo |= 0x04;
++    if ((KB[5] & 0x02) == 0)
++        lo |= 0x08;
++    if ((KB[6] & 0x01) == 0)
++        lo |= 0x10;
++    if ((KB[6] & 0x02) == 0)
++        lo |= 0x20;
++    if ((KB[5] & 0x40) == 0)
++        lo |= 0x40;
++    if ((KB[5] & 0x80) == 0)
++        lo |= 0x80;
++
++    uint8_t REG_SH1 = (KB[7] << 4) & 0xF0;
++    if (KB[5] & 0x04)
++        REG_SH1 |= 0x04;
++    if (KB[5] & 0x08)
++        REG_SH1 |= 0x08;
++    if (KB[6] & 0x80)
++        REG_SH1 |= 0x02;
++    if (KB[6] & 0x40)
++        REG_SH1 |= 0x01;
++
++    uint8_t REG_SH2 = ((KB[6] << 2) & 0xF0) | ((KB[7] >> 4) & 0x0F);
++
++    uint8_t SER0 = KB[3];
++    uint8_t SER1 = KB[1];
++    uint8_t SER2 = KB[2];
++
++    uint8_t total_rot = 4 + lo;
++    for (uint8_t i = 0; i < total_rot; ++i) {
++        uint8_t t_bit = (SER0 >> 7) & 1;
++        SER0 = ((SER0 << 1) & 0xFE) | ((SER1 >> 7) & 1);
++        SER1 = ((SER1 << 1) & 0xFE) | ((SER2 >> 7) & 1);
++        SER2 = ((SER2 << 1) & 0xFE) | t_bit;
++    }
++
++    uint8_t T1 = SER1 ^ REG_SH1;
++    uint8_t T2 = SER2 ^ REG_SH2;
++
++    uint8_t hi = 0;
++    if ((T1 & 0x10) == 0)
++        hi |= 0x04;
++    if ((T1 & 0x20) == 0)
++        hi |= 0x08;
++    if ((T2 & 0x80) == 0)
++        hi |= 0x02;
++    if ((T2 & 0x40) == 0)
++        hi |= 0x01;
++    if ((T1 & 0x01) == 0)
++        hi |= 0x40;
++    if ((T1 & 0x02) == 0)
++        hi |= 0x80;
++    if ((T2 & 0x08) == 0)
++        hi |= 0x20;
++    if ((T2 & 0x04) == 0)
++        hi |= 0x10;
++    *count = ((hi << 8) | lo) & 0xFFFF;
++}
++
++void SubCarRecentEntryDetailView::parseProtocol() {
++    btn = "";
++    cnt = SD_NO_CNT;
++    serial = 0;
++
++    if (entry_.sensorType == FPC_Invalid) return;
++
++    if (entry_.sensorType == FPC_SUZUKI) {
++        uint32_t data_high = (uint32_t)(entry_.data >> 32);
++        uint32_t data_low = (uint32_t)entry_.data;
++        serial = ((data_high & 0xFFF) << 16) | (data_low >> 16);
++        uint8_t buttonid = (data_low >> 12) & 0xF;
++        cnt = (data_high << 4) >> 16;
++        btn = to_string_dec_uint(buttonid);
++        return;
++    }
++    if (entry_.sensorType == FPC_VW) {
++        // uint32_t key_high = (entry_.data >> 32) & 0xFFFFFFFF;
++        uint32_t key_low = entry_.data & 0xFFFFFFFF;
++        serial = key_low;  // trimmed to 32 bits for VW
++        uint8_t check = entry_.data2 & 0xFF;
++        uint8_t btnid = (check >> 4) & 0xF;
++        switch (btnid) {
++            case 0x1:
++                btn = "UNLOCK";
++                break;
++            case 0x2:
++                btn = "LOCK";
++                break;
++            case 0x3:
++                btn = "Un+Lk";
++                break;
++            case 0x4:
++                btn = "TRUNK";
++                break;
++            case 0x5:
++                btn = "Un+Tr";
++                break;
++            case 0x6:
++                btn = "Lk+Tr";
++                break;
++            case 0x7:
++                btn = "Un+Lk+Tr";
++                break;
++            case 0x8:
++                btn = "PANIC";
++                break;
++            default:
++                btn = "Unknown";
++                break;
++        }
++    }
++    if (entry_.sensorType == FPC_SUBARU) {
++        uint8_t* data_bytes = (uint8_t*)&entry_.data;
++        serial = ((uint32_t)data_bytes[1] << 16) | ((uint32_t)data_bytes[2] << 8) | data_bytes[3];
++        uint8_t button = data_bytes[0] & 0x0F;
++        btn = to_string_dec_uint(button);
++        uint16_t cnttmp = 0;
++        subaru_decode_count(data_bytes, &cnttmp);
++        cnt = cnttmp;
++    }
++
++    if (entry_.sensorType == FPC_KIAV5) {
++        uint64_t yek = 0;
++        for (int i = 0; i < 8; i++) {
++            uint8_t byte = (entry_.data2 >> (i * 8)) & 0xFF;
++            uint8_t reversed = 0;
++            for (int b = 0; b < 8; b++) {
++                if (byte & (1 << b))
++                    reversed |= (1 << (7 - b));
++            }
++            yek |= ((uint64_t)reversed << ((7 - i) * 8));
++        }
++        serial = (uint32_t)((yek >> 32) & 0x0FFFFFFF);
++        uint8_t button = (uint8_t)((yek >> 60) & 0x0F);
++        uint32_t encrypted = (uint32_t)(yek & 0xFFFFFFFF);
++        btn = to_string_dec_uint(button);
++        // decode
++        uint8_t keystore_bytes[] = {0x53, 0x54, 0x46, 0x52, 0x4b, 0x45, 0x30, 0x30};
++        uint8_t s0 = (encrypted & 0xFF);
++        uint8_t s1 = (encrypted >> 8) & 0xFF;
++        uint8_t s2 = (encrypted >> 16) & 0xFF;
++        uint8_t s3 = (encrypted >> 24) & 0xFF;
++        int round_index = 1;
++        for (size_t i = 0; i < 18; i++) {
++            uint8_t r = keystore_bytes[round_index] & 0xFF;
++            int steps = 8;
++            while (steps > 0) {
++                uint8_t base;
++                if ((s3 & 0x40) == 0) {
++                    base = (s3 & 0x02) == 0 ? 0x74 : 0x2E;
++                } else {
++                    base = (s3 & 0x02) == 0 ? 0x3A : 0x5C;
++                }
++
++                if (s2 & 0x08) {
++                    base = (((base >> 4) & 0x0F) | ((base & 0x0F) << 4)) & 0xFF;
++                }
++                if (s1 & 0x01) {
++                    base = ((base & 0x3F) << 2) & 0xFF;
++                }
++                if (s0 & 0x01) {
++                    base = (base << 1) & 0xFF;
++                }
++
++                uint8_t temp = (s3 ^ s1) & 0xFF;
++                s3 = ((s3 & 0x7F) << 1) & 0xFF;
++                if (s2 & 0x80) {
++                    s3 |= 0x01;
++                }
++                s2 = ((s2 & 0x7F) << 1) & 0xFF;
++                if (s1 & 0x80) {
++                    s2 |= 0x01;
++                }
++                s1 = ((s1 & 0x7F) << 1) & 0xFF;
++                if (s0 & 0x80) {
++                    s1 |= 0x01;
++                }
++                s0 = ((s0 & 0x7F) << 1) & 0xFF;
++
++                uint8_t chk = (base ^ (r ^ temp)) & 0xFF;
++                if (chk & 0x80) {
++                    s0 |= 0x01;
++                }
++                r = ((r & 0x7F) << 1) & 0xFF;
++                steps--;
++            }
++            round_index = (round_index - 1) & 0x7;
++        }
++        cnt = (s0 + (s1 << 8)) & 0xFFFF;
++    }
++
++    if (entry_.sensorType == FPC_KIAV3V4) {
++        // not decrypted!
++        serial = (uint32_t)entry_.data;
++        // uint8_t button = entry_.data2 & 0xFF;
++        btn = "?";  // to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_KIAV2) {
++        serial = (uint32_t)((entry_.data >> 20) & 0xFFFFFFFF);
++        uint8_t button = (uint8_t)((entry_.data >> 16) & 0x0F);
++        uint16_t raw_count = (uint16_t)((entry_.data >> 4) & 0xFFF);
++        cnt = ((raw_count >> 4) | (raw_count << 8)) & 0xFFF;
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_KIAV1) {
++        serial = (uint32_t)((entry_.data >> 24) & 0xFFFFFFFF);
++        uint8_t button = (uint8_t)((entry_.data >> 16) & 0xFF);
++        cnt = (uint8_t)((entry_.data >> 4) & 0xF) << 8 | ((entry_.data >> 8) & 0xFF);
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_KIAV0) {
++        serial = (uint32_t)((entry_.data >> 12) & 0x0FFFFFFF);
++        uint8_t button = (entry_.data >> 8) & 0x0F;
++        cnt = (entry_.data >> 40) & 0xFFFF;
++        btn = to_string_dec_uint(button);
++    }
++    if (entry_.sensorType == FPC_FORDV0) {
++        uint8_t buf[13] = {0};
++
++        for (int i = 0; i < 8; ++i) {
++            buf[i] = (uint8_t)(entry_.data >> (56 - i * 8));
++        }
++
++        buf[8] = (uint8_t)(entry_.data2 >> 8);
++        buf[9] = (uint8_t)(entry_.data2 & 0xFF);
++        uint8_t tmp = buf[8];
++        uint8_t parity = 0;
++        uint8_t parity_any = (tmp != 0);
++        while (tmp) {
++            parity ^= (tmp & 1);
++            tmp >>= 1;
++        }
++        buf[11] = parity_any ? parity : 0;
++        uint8_t xor_byte;
++        uint8_t limit;
++        if (buf[11]) {
++            xor_byte = buf[7];
++            limit = 7;
++        } else {
++            xor_byte = buf[6];
++            limit = 6;
++        }
++
++        for (int idx = 1; idx < limit; ++idx) {
++            buf[idx] ^= xor_byte;
++        }
++
++        if (buf[11] == 0) {
++            buf[7] ^= xor_byte;
++        }
++
++        uint8_t orig_b7 = buf[7];
++        buf[7] = (orig_b7 & 0xAA) | (buf[6] & 0x55);
++        uint8_t mixed = (buf[6] & 0xAA) | (orig_b7 & 0x55);
++        buf[12] = mixed;
++        buf[6] = mixed;
++
++        uint32_t serial_le = ((uint32_t)buf[1]) |
++                             ((uint32_t)buf[2] << 8) |
++                             ((uint32_t)buf[3] << 16) |
++                             ((uint32_t)buf[4] << 24);
++
++        serial = ((serial_le & 0xFF) << 24) |
++                 (((serial_le >> 8) & 0xFF) << 16) |
++                 (((serial_le >> 16) & 0xFF) << 8) |
++                 ((serial_le >> 24) & 0xFF);
++
++        uint8_t button = (buf[5] >> 4) & 0x0F;
++
++        cnt = ((buf[5] & 0x0F) << 16) |
++              (buf[6] << 8) |
++              buf[7];
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_FIATV0) {
++        serial = (uint32_t)(entry_.data & 0xFFFFFFFF);
++        cnt = (uint32_t)((entry_.data >> 32) & 0xFFFFFFFF);
++        uint8_t button = (uint8_t)(entry_.data2 & 0xFF);
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_BMWV0) {
++        serial = (uint32_t)((entry_.data >> 12) & 0x0FFFFFFF);
++        uint8_t button = (entry_.data >> 8) & 0x0F;
++        cnt = (entry_.data >> 40) & 0xFFFF;
++        btn = to_string_dec_uint(button);
++    }
++
++    // Honda: raw 80-bit NRZ frame, bit-field positions are estimates.
++    // Byte 0 (decode_data2 [7:0])  = type/manufacturer byte
++    // Bits [35:8]  of decode_data  = fixed serial ID (28 bits, estimate)
++    // Bits [39:36] of decode_data  = button code (4 bits, estimate)
++    // Bits [55:40] of decode_data  = rolling counter (16 bits, estimate)
++    // Bits [79:56] = encrypted block — shown in raw hex via decode_data2
++    // NOTE: calibrate te_short in c-honda.hpp if data looks scrambled.
++    if (entry_.sensorType == FPC_HONDA) {
++        serial = (uint32_t)((entry_.data >> 8) & 0x0FFFFFFFUL);   // bits [35:8]
++        uint8_t button = (uint8_t)((entry_.data >> 36) & 0xFUL);  // bits [39:36]
++        cnt = (uint32_t)((entry_.data >> 40) & 0xFFFFUL);         // bits [55:40]
++        btn = to_string_hex(button, 1);
++    }
++
++    /*if (entry_.sensorType == FPC_KIAV6) {
++        // not decrypted!
++        serial = 0;
++        btn = "?";
++        cnt = 0;
++    }*/
++
++    if (entry_.sensorType == FPC_FORDV1) {
++        // 136-bit Manchester FM; bytes[0..6] in data, bytes[7..15] in data2
++        // No public field mapping — upper 4 bytes as candidate serial
++        serial = (uint32_t)(entry_.data >> 32);
++    }
++
++
++    if (entry_.sensorType == FPC_MAZDAV0) {
++        // 64-bit Manchester; checksum = sum of bytes[0..6] == byte[7]
++        // No public field mapping — upper 4 bytes as candidate serial
++        serial = (uint32_t)(entry_.data >> 32);
++    }
++
++    if (entry_.sensorType == FPC_MITSUBISHIV0) {
++        // 96-bit PWM OOK; bytes[0..7] in data, bytes[8..11] in data2
++        serial = (uint32_t)(entry_.data >> 32);
++    }
++
++    if (entry_.sensorType == FPC_KIAV7) {
++        // [0x4C][cnt_hi][cnt_lo][serial:28][btn:4][crc8]
++        serial = (uint32_t)((entry_.data >> 12) & 0x0FFFFFFFUL);
++        uint8_t button = (uint8_t)((entry_.data >> 8) & 0xFUL);
++        cnt = (uint32_t)((entry_.data >> 40) & 0xFFFFUL);
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_FIATV1) {
++        // [pre*2B][serial*4B][btn:4|epoch:4][cnt:5|scr:2|fix:1][enc*5B][crc8]
++        // decode_data bits[47:16]=serial, [15:12]=btn, [7:3]=cnt
++        serial = (uint32_t)((entry_.data >> 16) & 0xFFFFFFFFUL);
++        uint8_t button = (uint8_t)((entry_.data >> 12) & 0xFUL);
++        cnt = (uint8_t)((entry_.data >> 3) & 0x1FUL);
++        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_PORSCHEV0) {
++        // 64-bit rolling code; no public frame field map
++        serial = (uint32_t)(entry_.data >> 32);
++    }
++
++    if (entry_.sensorType == FPC_CHRYSLERV0) {
++        // 80-bit PWM; bytes[0..7] in data, bytes[8..9] in data2
++        // Bytes 1-4 used in XOR validation — candidate serial
++        serial = (uint32_t)((entry_.data >> 24) & 0xFFFFFFFFUL);
++        uint8_t button = (uint8_t)((entry_.data >> 16) & 0xFFUL);
++        btn = to_string_hex(button, 2);
++    }
++
++    if (entry_.sensorType == FPC_BMWCAS4) {
++        // 64-bit Manchester; byte[0]=0x30 (fixed), byte[6]=0xC5 (fixed)
++        // Bytes 1-4 = candidate key ID
++        serial = (uint32_t)((entry_.data >> 24) & 0xFFFFFFFFUL);
++    }
++
++    if (entry_.sensorType == FPC_HYUNDAIKIA_V0) {
++        // [serial:32][button_mask:16][checksum:16]
++        serial = (uint32_t)(entry_.data >> 32);
++        uint16_t bmask = (uint16_t)((entry_.data >> 16) & 0xFFFFUL);
++        btn = to_string_hex(bmask, 4);
++    }
++
++    if (entry_.sensorType == FPC_HYUNDAISANTAFEV0) {
++        // [rolling:32][serial:24][counter:8] in data; [button:8][crc8] in data2
++        serial = (uint32_t)((entry_.data >> 8) & 0xFFFFFFUL);
++        uint8_t button = (uint8_t)((entry_.data2 >> 8) & 0xFFUL);
++        cnt = (uint8_t)(entry_.data & 0xFFUL);
++        btn = to_string_hex(button, 2);
++    }
++
++    return;
++}
++
++}  // namespace ui::subcarrx
++
++namespace ui {
++
++template <>
++void RecentEntriesTable<ui::subcarrx::SubCarRecentEntries>::draw(
++    const Entry& entry,
++    const Rect& target_rect,
++    Painter& painter,
++    const Style& style,
++    ui::RecentEntriesColumns& columns) {
++    std::string line{};
++    line.reserve(30);
++
++    line = ui::subcarrx::SubCarView::getSensorTypeName((FPROTO_SUBCAR_SENSOR)entry.sensorType);
++    line = line + " " + to_string_hex(entry.data << 32);
++    line.resize(columns.at(0).second, ' ');
++    std::string ageStr = to_string_dec_uint(entry.age);
++    std::string bitsStr = to_string_dec_uint(entry.bits);
++    line += ui::subcarrx::SubCarView::pad_string_with_spaces(5 - (int)bitsStr.length()) + bitsStr;
++    line += ui::subcarrx::SubCarView::pad_string_with_spaces(4 - (int)ageStr.length()) + ageStr;
++
++    line.resize(target_rect.width() / 8, ' ');
++    painter.draw_string(target_rect.location(), style, line);
++}
++
++}  // namespace ui
+diff --git a/firmware/application/apps/ui_subcar.hpp b/firmware/application/apps/ui_subcar.hpp
+new file mode 100644
+index 00000000..2f28bc5e
+--- /dev/null
++++ b/firmware/application/apps/ui_subcar.hpp
+@@ -0,0 +1,228 @@
++/*
++ * Copyright (C) 2026 HTotoo
++ *
++ * This file is part of PortaPack.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; see the file COPYING.  If not, write to
++ * the Free Software Foundation, Inc., 51 Franklin Street,
++ * Boston, MA 02110-1301, USA.
++ */
++/*
++   This and The other files related to this is based on a lot of great people's work. https://github.com/RocketGod-git/ProtoPirate Check the repo, and the credits inside.
++*/
++
++#ifndef __UI_SubCar_H__
++#define __UI_SubCar_H__
++
++#define SD_NO_SERIAL 0xFFFFFFFF
++#define SD_NO_BTN 0xFF
++#define SD_NO_CNT 0xFF
++
++#include "ui.hpp"
++#include "ui_navigation.hpp"
++#include "ui_receiver.hpp"
++#include "ui_freq_field.hpp"
++#include "app_settings.hpp"
++#include "radio_state.hpp"
++#include "utility.hpp"
++#include "log_file.hpp"
++#include "recent_entries.hpp"
++
++#include "../../baseband/fprotos/subcartypes.hpp"
++
++using namespace ui;
++
++namespace ui::subcarrx {
++
++struct SubCarRecentEntry {
++    using Key = uint64_t;
++    static constexpr Key invalid_key = 0x0fffffff;
++    uint8_t sensorType = FPC_Invalid;
++    uint16_t bits = 0;
++    uint16_t age = 0;  // updated on each seconds, show how long the signal was last seen
++    uint64_t data = 0;
++    uint64_t data2 = 0;
++    SubCarRecentEntry() {}
++    SubCarRecentEntry(
++        uint8_t sensorType,
++        uint64_t data = 0,
++        uint64_t data2 = 0,
++        uint16_t bits = 0)
++        : sensorType{sensorType},
++          bits{bits},
++          data{data},
++          data2{data2} {
++    }
++    Key key() const {
++        return (data ^ ((static_cast<uint64_t>(sensorType) & 0xFF) << 0));  // should be optimized...
++    }
++    void inc_age(int delta) {
++        if (UINT16_MAX - delta > age) age += delta;
++    }
++    void reset_age() {
++        age = 0;
++    }
++
++    std::string to_csv();
++};
++
++class SubCarLogger {
++   public:
++    Optional<File::Error> append(const std::filesystem::path& filename) {
++        return log_file.append(filename);
++    }
++
++    void log_data(SubCarRecentEntry& data);
++    void write_header() {
++        log_file.write_entry(";Type; Bits; Data;");
++    }
++
++   private:
++    LogFile log_file{};
++};
++using SubCarRecentEntries = RecentEntries<SubCarRecentEntry>;
++using SubCarRecentEntriesView = RecentEntriesView<SubCarRecentEntries>;
++
++class SubCarView : public View {
++   public:
++    SubCarView(NavigationView& nav);
++    ~SubCarView();
++
++    void focus() override;
++
++    std::string title() const override { return "SubCar"; };
++    static const char* getSensorTypeName(FPROTO_SUBCAR_SENSOR type);
++    static std::string pad_string_with_spaces(int snakes);
++
++   private:
++    void on_tick_second();
++    void on_data(const SubCarDataMessage* data);
++
++    NavigationView& nav_;
++    RxRadioState radio_state_{
++        433'920'000 /* frequency */,
++        1'750'000 /* bandwidth */,
++        4'000'000 /* sampling rate */,
++        ReceiverModel::Mode::AMAudio};
++    bool logging = false;
++    uint8_t modulation = 0;
++    app_settings::SettingsManager settings_{
++        "rx_subcar",
++        app_settings::Mode::RX,
++        {
++            {"log"sv, &logging},
++            {"modulationmode"sv, &modulation},
++        }};
++
++    SubCarRecentEntries recent{};
++
++    RFAmpField field_rf_amp{
++        {UI_POS_X(13), UI_POS_Y(0)}};
++    LNAGainField field_lna{
++        {UI_POS_X(15), UI_POS_Y(0)}};
++    VGAGainField field_vga{
++        {UI_POS_X(18), UI_POS_Y(0)}};
++    RSSI rssi{
++        {UI_POS_X(21), 0, UI_POS_WIDTH_REMAINING(24), 4}};
++    Channel channel{
++        {UI_POS_X(21), 5, UI_POS_WIDTH_REMAINING(24), 4},
++    };
++    RxFrequencyField field_frequency{
++        {UI_POS_X(0), UI_POS_Y(0)},
++        nav_};
++
++    SignalToken signal_token_tick_second{};
++
++    Button button_clear_list{
++        {UI_POS_X(0), UI_POS_Y(1), UI_POS_WIDTH(7), UI_POS_HEIGHT(2)},
++        "Clear"};
++
++    Checkbox check_log{
++        {UI_POS_X(8), UI_POS_Y(1)},
++        3,
++        "Log",
++        true};
++
++    Labels labels{
++        {{UI_POS_X(15), UI_POS_Y(1)}, "Mode:", Theme::getInstance()->fg_light->foreground},
++    };
++    ui::OptionsField options_mode{
++        {UI_POS_X(22), UI_POS_Y(1)},
++        3,
++        {{"AM", 0}, {"FM", 1}}};
++
++    static constexpr auto header_height = 3 * 16;
++
++    std::unique_ptr<SubCarLogger> logger{};
++
++    ui::RecentEntriesColumns columns{{
++        {"Type", 0},
++        {"Bits", 4},
++        {"Age", 3},
++    }};
++    SubCarRecentEntriesView recent_entries_view{columns, recent};
++
++    void on_freqchg(int64_t freq);
++    MessageHandlerRegistration message_handler_freqchg{
++        Message::ID::FreqChangeCommand,
++        [this](Message* const p) {
++            const auto message = static_cast<const FreqChangeCommandMessage*>(p);
++            this->on_freqchg(message->freq);
++        }};
++
++    MessageHandlerRegistration message_handler_packet{
++        Message::ID::SubCarData,
++        [this](Message* const p) {
++            const auto message = static_cast<const SubCarDataMessage*>(p);
++            this->on_data(message);
++        }};
++};
++
++class SubCarRecentEntryDetailView : public View {
++   public:
++    SubCarRecentEntryDetailView(NavigationView& nav, const SubCarRecentEntry& entry);
++
++    void update_data();
++    void focus() override;
++
++   private:
++    NavigationView& nav_;
++    SubCarRecentEntry entry_{};
++
++    uint32_t serial = 0;
++    std::string btn = "";
++    uint32_t cnt = SD_NO_CNT;
++
++    Text text_type{{UI_POS_X(0), UI_POS_Y(1), UI_POS_WIDTH(15), UI_POS_HEIGHT(1)}, "?"};
++    Text text_id{{UI_POS_X(6), UI_POS_Y(2), UI_POS_WIDTH(10), UI_POS_HEIGHT(1)}, "?"};
++
++    Console console{
++        {UI_POS_X(0), UI_POS_Y(4), UI_POS_MAXWIDTH, screen_height - (4 * 16) - 36}};
++
++    Labels labels{
++        {{UI_POS_X(0), UI_POS_Y(0)}, "Type:", Theme::getInstance()->fg_light->foreground},
++        {{UI_POS_X(0), UI_POS_Y(2)}, "Serial: ", Theme::getInstance()->fg_light->foreground},
++        {{UI_POS_X(0), UI_POS_Y(3)}, "Data:", Theme::getInstance()->fg_light->foreground},
++    };
++
++    Button button_done{
++        {screen_width - 96 - 4, screen_height - 32 - 12, 96, 32},
++        "Done"};
++
++    void parseProtocol();
++};
++
++}  // namespace ui::subcarrx
++
++#endif /*__UI_SubCar_H__*/
+diff --git a/firmware/application/external/external.cmake b/firmware/application/external/external.cmake
+index 868855bd..608e5ecd 100644
+--- a/firmware/application/external/external.cmake
++++ b/firmware/application/external/external.cmake
+@@ -1,455 +1,33 @@
+-set(EXTCPPSRC
+-	#afsk_rx   16 byte
+-	external/afsk_rx/main.cpp
+-	external/afsk_rx/ui_afsk_rx.cpp
+-
+-	#calculator  632 bytes
+-	external/calculator/main.cpp
+-	external/calculator/ui_calculator.cpp
+-
+-	#font_viewer 8 byte?!
+-	external/font_viewer/main.cpp
+-	external/font_viewer/ui_font_viewer.cpp
+-
+-	#blespam 336 bytes - array initializers?
+-	external/blespam/main.cpp
+-	external/blespam/ui_blespam.cpp
+-
+-	#analogtv 552 bytes 
+-	external/analogtv/main.cpp
+-	external/analogtv/analog_tv_app.cpp
+-	external/analogtv/ui_tv.cpp
+-
+-	#nrf_rx  40 byte
+-	external/nrf_rx/main.cpp
+-	external/nrf_rx/ui_nrf_rx.cpp
+-
+-	#coasterp  0 byte
+-	external/coasterp/main.cpp
+-	external/coasterp/ui_coasterp.cpp
+-
+-	#lge  120 byte
+-	external/lge/main.cpp
+-	external/lge/lge_app.cpp
+-	external/lge/rfm69.cpp
+-
+-	#lcr - 460 byte flash
+-	external/lcr/main.cpp
+-	external/lcr/ui_lcr.cpp
+-
+-	#jammer 144 byte
+-	external/jammer/main.cpp
+-	external/jammer/ui_jammer.cpp
+-
+-	#gpssim  160 byte
+-	external/gpssim/main.cpp
+-	external/gpssim/gps_sim_app.cpp
++# ARFPORT automotive-only external apps
++# Stripped of all non-car apps (games, ham radio, audio, etc.)
+ 
+-	#spainter   464 byte
+-	external/spainter/main.cpp
+-	external/spainter/ui_spectrum_painter.cpp
+-	external/spainter/ui_spectrum_painter_text.cpp
+-	external/spainter/ui_spectrum_painter_image.cpp
+-
+-	#keyfob 216 byte
+-	external/keyfob/main.cpp
+-	external/keyfob/ui_keyfob.cpp
+-	external/keyfob/ui_keyfob.hpp
+-
+-	#tetris 88 byte
+-	external/tetris/main.cpp
+-	external/tetris/ui_tetris.cpp
+-
+-
+-	#extsensors 192 byte
+-	external/extsensors/main.cpp
+-	external/extsensors/ui_extsensors.cpp
+-	external/extsensors/ui_extsensors.hpp
+-
+-	#foxhunt 0
+-	external/foxhunt/main.cpp
+-	external/foxhunt/ui_foxhunt_rx.cpp
+-	external/foxhunt/ui_foxhunt_rx.hpp
+-
+-	#audio_test 192 byte
+-	external/audio_test/main.cpp
+-	external/audio_test/ui_audio_test.cpp
+-
+-	#wardrivemap 64 byte
+-	external/wardrivemap/main.cpp
+-	external/wardrivemap/ui_wardrivemap.cpp
+-
+-	#tpmsrx 920 byte- possible shared part with baseband
++set(EXTCPPSRC
++	#tpmsrx
+ 	external/tpmsrx/main.cpp
+ 	external/tpmsrx/tpms_app.cpp
+ 
+-	#tpmstx 800 bytes - TPMS transmit with editable fields
++	#tpmstx
+ 	external/tpmstx/main.cpp
+ 	external/tpmstx/tpms_tx_app.cpp
+ 
+-	#protoview 8 byte
+-	external/protoview/main.cpp
+-	external/protoview/ui_protoview.cpp
+-
+-	#adsbtx  3544 byte - adsb shared part
+-	external/adsbtx/main.cpp
+-	external/adsbtx/ui_adsb_tx.cpp
+-
+-	#morse_tx 768 bytes -- disabled because of the new morse tx app with more functions
+-	#external/morse_tx/main.cpp
+-	#external/morse_tx/ui_morse.cpp
+-
+-	#sstvtx 456 bytes
+-	external/sstvtx/main.cpp
+-	external/sstvtx/ui_sstvtx.cpp
+-
+-	#same_tx
+-	external/same_tx/main.cpp
+-	external/same_tx/ui_same_tx.cpp
+-
+-	#mdc_tx
+-	external/mdc_tx/main.cpp
+-	external/mdc_tx/ui_mdc_tx.cpp
+-
+-	#sstvrx
+-	external/sstvrx/main.cpp
+-	external/sstvrx/ui_sstvrx.cpp
+-
+-	#random 464  bytes.
+-	external/random_password/main.cpp
+-	external/random_password/ui_random_password.cpp
+-	external/random_password/sha512.cpp
+-
+-	#acars
+-	external/acars_rx/main.cpp
+-	external/acars_rx/acars_app.cpp
+-
+-	#wefax_rx 192 bytes
+-	external/wefax_rx/main.cpp
+-	external/wefax_rx/ui_wefax_rx.cpp
+-
+-
+-	#noaaapt_rx  72 bytes
+-	external/noaaapt_rx/main.cpp
+-	external/noaaapt_rx/ui_noaaapt_rx.cpp
+-
+-	#shoppingcart_lock 272 bytes
+-	external/shoppingcart_lock/main.cpp
+-	external/shoppingcart_lock/shoppingcart_lock.cpp
+-
+-
+-	#ookbrute  80 byte
+-	external/ookbrute/main.cpp
+-	external/ookbrute/ui_ookbrute.cpp
+-
+-	#ook_editor  1808 bytes
+-	external/ook_editor/main.cpp
+-	external/ook_editor/ui_ook_editor.cpp
+-
+-	#cvs_spam 24 byte
+-	external/cvs_spam/main.cpp
+-	external/cvs_spam/cvs_spam.cpp
+-
+-	#flippertx  712 bytes
+-	external/flippertx/main.cpp
+-	external/flippertx/ui_flippertx.cpp
+-
+-	#remote 1664 bytes
+-	external/remote/main.cpp
+-	external/remote/ui_remote.cpp
+-
+-	#mcu_temperature    112
+-	external/mcu_temperature/main.cpp
+-	external/mcu_temperature/mcu_temperature.cpp
+-
+-	#fmradio  640
+-	external/fmradio/main.cpp
+-	external/fmradio/ui_fmradio.cpp
+-
+-	#tuner 384
+-	external/tuner/main.cpp
+-	external/tuner/ui_tuner.cpp
+-
+-	#metronome 696 bytes
+-	external/metronome/main.cpp
+-	external/metronome/ui_metronome.cpp
+-
+-	#app_manager 40 bytes
+-	external/app_manager/main.cpp
+-	external/app_manager/ui_app_manager.cpp
+-
+-	#hopper 472 bytes
+-	external/hopper/main.cpp
+-	external/hopper/ui_hopper.cpp
++	external/keeloqtx/main.cpp
++	external/keeloqtx/ui_keeloqtx.cpp
+ 
+-	# whip calculator  48 bytes
+-	external/antenna_length/main.cpp
+-	external/antenna_length/ui_whipcalc.cpp
++	#subghztx
++	external/subghztx/main.cpp
++	external/subghztx/ui_subghztx.cpp
++	external/subghztx/sub_file_parser.cpp
++	external/subghztx/sub_file_dispatch.cpp
++	external/subghztx/fproto_encoder_base.cpp
++	external/subghztx/fproto_encoder_extra.cpp
++	external/subghztx/fproto_enc_keeloq.cpp
++	external/subghztx/keeloq_common_ext.cpp
+ 
+-	# wav viewer 1232 bytes
+-	external/wav_view/main.cpp
+-	external/wav_view/ui_view_wav.cpp
+-
+-
+-	# wipe sdcard 16 byte
+-	external/sd_wipe/main.cpp
+-	external/sd_wipe/ui_sd_wipe.cpp
+-
+-	# playlist editor 232 bytes
+-	external/playlist_editor/main.cpp
+-	external/playlist_editor/ui_playlist_editor.cpp
+-
+-	#snake 240 bytes
+-	external/snake/main.cpp
+-	external/snake/ui_snake.cpp
+-
+-
+-	#stopwatch 0
+-	external/stopwatch/main.cpp
+-	external/stopwatch/ui_stopwatch.cpp
+-
+-	#breakout 1144 bytes
+-	external/breakout/main.cpp
+-	external/breakout/ui_breakout.cpp
+-
+-	#dinogame 0 
+-	external/dinogame/main.cpp
+-	external/dinogame/ui_dinogame.cpp
+-
+-	#doom 224
+-	external/doom/main.cpp
+-	external/doom/ui_doom.cpp
+-
+-	#debug_pmem  944 byte
+-	external/debug_pmem/main.cpp
+-	external/debug_pmem/ui_debug_pmem.cpp
+-
+-	#scanner 520 byte
+-	external/scanner/main.cpp
+-	external/scanner/ui_scanner.cpp
+-
+-	#level  24 byte
+-	external/level/main.cpp
+-	external/level/ui_level.cpp
+-
+-	#gfxEQ 80 byte
+-	external/gfxeq/main.cpp
+-	external/gfxeq/ui_gfxeq.cpp	
+-
+-	#waterfall designer
+-	external/waterfall_designer/main.cpp
+-	external/waterfall_designer/ui_waterfall_designer.cpp
+-
+-	#detector_rx  168 byte
+-	external/detector_rx/main.cpp
+-	external/detector_rx/ui_detector_rx.cpp
+-
+-	#space_invaders  0 byte
+-	external/spaceinv/main.cpp
+-	external/spaceinv/ui_spaceinv.cpp
+-
+-	#blackjack 24 byte
+-	external/blackjack/main.cpp
+-	external/blackjack/ui_blackjack.cpp
+-
+-	#battleship  256 byte
+-	external/battleship/main.cpp
+-	external/battleship/ui_battleship.cpp
+-
+-	#ert 3040 bytes - has common with baseband, could be renamed the namespace, so both could have it, but not kept in fw.
+-	external/ert/main.cpp
+-	external/ert/ert_app.cpp
+-
+-	#epirb_rx 168 byte flash 
+-	external/epirb_rx/main.cpp
+-	external/epirb_rx/ui_epirb_rx.cpp
+-
+-	#epirb_tx
+-	external/epirb_tx/main.cpp
+-	external/epirb_tx/ui_epirb_tx.cpp
+-
+-	#soundboard  272byte  - 1236 bytes
+-	external/soundboard/main.cpp
+-	external/soundboard/soundboard_app.cpp
+-
+-	#game2048   - 168 byte flash
+-	external/game2048/main.cpp
+-	external/game2048/ui_game2048.cpp
+-
+-	#bht_tx - 3920 byte flash, unknown
+-	external/bht_tx/main.cpp
+-	external/bht_tx/ui_bht_tx.cpp
+-	external/bht_tx/bht.cpp
+-
+-	#morse_practice - 80 byte flash - bc of array initializers
+-	external/morse_practice/main.cpp
+-	external/morse_practice/ui_morse_practice.cpp
+-
+-	#adult_toys_controller  144 bytes 
+-	external/adult_toys_controller/main.cpp
+-	external/adult_toys_controller/ui_adult_toys_controller.cpp
+-
+-	#flex_rx
+-	external/flex_rx/main.cpp
+-	external/flex_rx/ui_flex_rx.cpp	
+-
+-	#subcarrx
+-	external/subcarrx/main.cpp
+-	external/subcarrx/ui_subcar.cpp
+-
+-	#siggen
+-	external/siggen/main.cpp
+-	external/siggen/ui_siggen.cpp
+-
+-	#morse_radio
+-	external/morse_radio/main.cpp
+-	external/morse_radio/ui_morse_radio.cpp
+-
+-	#morseradiotx
+-	external/morseradiotx/main.cpp
+-	external/morseradiotx/ui_morse_radiotx.cpp
+-
+-	#keeloqtx
+-  	external/keeloqtx/main.cpp
+-  	external/keeloqtx/ui_keeloqtx.cpp
+-
+-	#rtty_rx
+-	external/rtty_rx/main.cpp
+-	external/rtty_rx/ui_rtty_rx.cpp
+-	external/rtty_rx/baudot.cpp
+-
+-	#rtty_tx
+-	external/rtty_tx/main.cpp
+-	external/rtty_tx/ui_rtty_tx.cpp
+-	external/rtty_tx/baudot.cpp
+-
+-    #pocsag_tx
+-	external/pocsag_tx/main.cpp
+-	external/pocsag_tx/ui_pocsag_tx.cpp
+-
+-	#flex_tx
+-	external/flex_tx/main.cpp
+-	external/flex_tx/ui_flex_tx.cpp
+-
+-	#time_sink
+-	external/time_sink/main.cpp
+-	external/time_sink/ui_time_sink.cpp
+-
+-	#kiss_tnc
+-	external/kiss_tnc/main.cpp
+-	external/kiss_tnc/ui_kiss_tnc.cpp
+-
+-	#fpv_detect
+-	external/fpv_detect/main.cpp
+-	external/fpv_detect/ui_fpv_detect.cpp
+-
+-	#p25_tx
+-	external/p25_tx/main.cpp
+-	external/p25_tx/ui_p25_tx.cpp
+-
+-	#two_tone_pager
+-	external/two_tone_pager/main.cpp
+-	external/two_tone_pager/ui_two_tone_pager.cpp
+-
+-	#two_tone_rx
+-	external/two_tone_rx/main.cpp
+-	external/two_tone_rx/ui_two_tone_rx.cpp 
+ )
+ 
+ set(EXTAPPLIST
+-	afsk_rx
+-	calculator
+-	font_viewer
+-	blespam
+-	analogtv
+-	nrf_rx
+-	coasterp
+-	lge
+-	lcr
+-	jammer
+-	gpssim
+-	spainter
+-	keyfob
+-	tetris
+-	extsensors
+-	foxhunt_rx
+-	audio_test
+-	wardrivemap
+ 	tpmsrx
+ 	tpmstx
+-	protoview
+-	adsbtx
+-	#morse_tx
+-	sstvtx
+-	same_tx
+-	mdc_tx
+-	sstvrx
+-	random_password
+-	acars_rx
+-	wefax_rx
+-	noaaapt_rx
+-	shoppingcart_lock
+-	ookbrute
+-	ook_editor
+-	cvs_spam
+-	flippertx
+-	remote
+-	mcu_temperature
+-	fmradio
+-	tuner
+-	metronome
+-	app_manager
+-	hopper
+-	antenna_length
+-	view_wav
+-	sd_wipe
+-	playlist_editor
+-	snake
+-	stopwatch
+-	breakout
+-	dinogame
+-	doom
+-	debug_pmem
+-	scanner
+-	level
+-	gfxeq
+-	waterfall_designer
+-	detector_rx
+-	fpv_detect
+-	spaceinv
+-	blackjack
+-	battleship
+-	ert
+-	epirb_rx
+-	epirb_tx
+-	soundboard
+-	game2048
+-	bht_tx
+-	morse_practice
+-	adult_toys_controller
+-	flex_rx
+-	subcarrx
+-	siggen
+-	morse_radio
+-	morseradiotx
+ 	keeloqtx
+-	rtty_rx
+-	rtty_tx
+-	pocsag_tx
+-	flex_tx
+-	time_sink
+-	kiss_tnc
+-	p25_tx
+-	two_tone_pager
+-	two_tone_rx
++	subghztx
+ )
+-
+-# sdusb has type conflicts with PRALINE (HackRF Pro) - add only for non-PRALINE builds
+-if(NOT BOARD STREQUAL "PRALINE")
+-       list(APPEND EXTCPPSRC
+-               external/sdusb/main.cpp
+-               external/sdusb/ui_sd_over_usb.cpp
+-       )
+-       list(APPEND EXTAPPLIST sdusb)
+-endif()
+-
+diff --git a/firmware/application/ui_navigation.cpp b/firmware/application/ui_navigation.cpp
+index 77978b4d..007ee29d 100644
+--- a/firmware/application/ui_navigation.cpp
++++ b/firmware/application/ui_navigation.cpp
+@@ -30,11 +30,11 @@
+ #include "portapack.hpp"
+ 
+ #include "ui_about_simple.hpp"
+-#include "ui_adsb_rx.hpp"
+-#include "ui_aprs_rx.hpp"
+-#include "ui_aprs_tx.hpp"
+-#include "ui_btle_rx.hpp"
+-#include "ui_debug.hpp"
++// ARFPORT_REMOVED: #include "ui_adsb_rx.hpp"
++// ARFPORT_REMOVED: #include "ui_aprs_rx.hpp"
++// ARFPORT_REMOVED: #include "ui_aprs_tx.hpp"
++// ARFPORT_REMOVED: #include "ui_btle_rx.hpp"
++// ARFPORT_REMOVED: #include "ui_debug.hpp"
+ #include "ui_encoders.hpp"
+ #include "ui_fileman.hpp"
+ #include "ui_flash_utility.hpp"
+@@ -42,29 +42,31 @@
+ #include "ui_freqman.hpp"
+ #include "ui_iq_trim.hpp"
+ #include "ui_looking_glass_app.hpp"
+-#include "ui_mictx.hpp"
++// ARFPORT_REMOVED: #include "ui_mictx.hpp"
+ 
+ #include "ui_playlist.hpp"
+-#include "ui_rds.hpp"
+-#include "ui_recon.hpp"
++// ARFPORT_REMOVED: #include "ui_rds.hpp"
++// ARFPORT_REMOVED: #include "ui_recon.hpp"
+ #include "ui_search.hpp"
+ #include "ui_settings.hpp"
+-#include "ui_sonde.hpp"
++// ARFPORT_REMOVED: #include "ui_sonde.hpp"
+ #include "ui_ss_viewer.hpp"
+ // #include "ui_test.hpp"
+-#include "ui_text_editor.hpp"
+-#include "ui_touchtunes.hpp"
+-#include "ui_weatherstation.hpp"
++// ARFPORT_REMOVED: #include "ui_text_editor.hpp"
++// ARFPORT_REMOVED: #include "ui_touchtunes.hpp"
++// ARFPORT_REMOVED: #include "ui_weatherstation.hpp"
+ #include "ui_subghzd.hpp"
++#include "ui_subcar.hpp"
+ #include "ui_battinfo.hpp"
+ #include "ui_external_items_menu_loader.hpp"
+ 
+-#include "ais_app.hpp"
++// ARFPORT_REMOVED: #include "ais_app.hpp"
+ #include "analog_audio_app.hpp"
+-#include "ble_rx_app.hpp"
+-#include "ble_tx_app.hpp"
++#include "audio.hpp"
++// ARFPORT_REMOVED: #include "ble_rx_app.hpp"
++// ARFPORT_REMOVED: #include "ble_tx_app.hpp"
+ #include "capture_app.hpp"
+-#include "pocsag_app.hpp"
++// ARFPORT_REMOVED: #include "pocsag_app.hpp"
+ 
+ #include "core_control.hpp"
+ #include "file.hpp"
+@@ -87,43 +89,44 @@ const NavigationView::AppList NavigationView::appList = {
+     /* HOME ******************************************************************/
+     {nullptr, "Receive", HOME, Color::cyan(), &bitmap_icon_receivers, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<ReceiversMenuView>(nav); }},
+     {nullptr, "Transmit", HOME, Color::cyan(), &bitmap_icon_transmit, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TransmittersMenuView>(nav); }},
+-    {nullptr, "Transceiver", HOME, Color::cyan(), &bitmap_icon_transceivers, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TransceiversMenuView>(nav); }},
+-    {"recon", "Recon", HOME, Color::green(), &bitmap_icon_scanner, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<ReconView>(nav); }},
++    // ARFPORT_REMOVED: {nullptr, "Transceiver", HOME, Color::cyan(), &bitmap_icon_transceivers, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TransceiversMenuView>(nav); }},
++    // ARFPORT_REMOVED: {"recon", "Recon", HOME, Color::green(), &bitmap_icon_scanner, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<ReconView>(nav); }},
+     {"capture", "Capture", HOME, Color::red(), &bitmap_icon_capture, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<CaptureAppView>(nav); }},
+     {"replay", "Replay", HOME, Color::green(), &bitmap_icon_replay, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<PlaylistView>(nav); }},
+     {"lookingglass", "Looking Glass", HOME, Color::green(), &bitmap_icon_looking, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<GlassView>(nav); }},
+     {nullptr, "Utilities", HOME, Color::cyan(), &bitmap_icon_utilities, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<UtilitiesMenuView>(nav); }},
+-    {nullptr, "Games", HOME, Color::cyan(), &bitmap_icon_games, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<GamesMenuView>(nav); }},
++    // ARFPORT_REMOVED: {nullptr, "Games", HOME, Color::cyan(), &bitmap_icon_games, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<GamesMenuView>(nav); }},
+     {nullptr, "Settings", HOME, Color::cyan(), &bitmap_icon_setup, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<SettingsMenuView>(nav); }},
+ 
+     /* RX ********************************************************************/
+-    {"adsbrx", "ADS-B", RX, Color::green(), &bitmap_icon_adsb, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<ADSBRxView>(nav); }},
+-    {"ais", "AIS Boats", RX, Color::green(), &bitmap_icon_ais, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<AISAppView>(nav); }},
+-    {"aprsrx", "APRS", RX, Color::green(), &bitmap_icon_aprs, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<APRSRXView>(nav); }},
+-    {"audio", "Audio", RX, Color::green(), &bitmap_icon_speaker, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<AnalogAudioView>(nav); }},
+-    {"blerx", "BLE Rx", RX, Color::green(), &bitmap_icon_btle, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<BLERxView>(nav); }},
+-    {"pocsag", "POCSAG", RX, Color::green(), &bitmap_icon_pocsag, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<POCSAGAppView>(nav); }},
+-    {"radiosonde", "Radiosnde", RX, Color::green(), &bitmap_icon_sonde, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<SondeView>(nav); }},
++    // ARFPORT_REMOVED: {"adsbrx", "ADS-B", RX, Color::green(), &bitmap_icon_adsb, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<ADSBRxView>(nav); }},
++    // ARFPORT_REMOVED: {"ais", "AIS Boats", RX, Color::green(), &bitmap_icon_ais, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<AISAppView>(nav); }},
++    // ARFPORT_REMOVED: {"aprsrx", "APRS", RX, Color::green(), &bitmap_icon_aprs, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<APRSRXView>(nav); }},
++    // ARFPORT_REMOVED: {"audio", "Audio", RX, Color::green(), &bitmap_icon_speaker, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<AnalogAudioView>(nav); }},
++    // ARFPORT_REMOVED: {"blerx", "BLE Rx", RX, Color::green(), &bitmap_icon_btle, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<BLERxView>(nav); }},
++    // ARFPORT_REMOVED: {"pocsag", "POCSAG", RX, Color::green(), &bitmap_icon_pocsag, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<POCSAGAppView>(nav); }},
++    // ARFPORT_REMOVED: {"radiosonde", "Radiosnde", RX, Color::green(), &bitmap_icon_sonde, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<SondeView>(nav); }},
+     {"search", "Search", RX, Color::yellow(), &bitmap_icon_search, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<SearchView>(nav); }},
+     {"subghzd", "SubGhzD", RX, Color::yellow(), &bitmap_icon_remote, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<SubGhzDView>(nav); }},
+-    {"weather", "Weather", RX, Color::green(), &bitmap_icon_thermometer, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<WeatherView>(nav); }},
++    {"subcar", "SubCar", RX, Color::orange(), &bitmap_icon_remote, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<subcarrx::SubCarView>(nav); }},
++    // ARFPORT_REMOVED: {"weather", "Weather", RX, Color::green(), &bitmap_icon_thermometer, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<WeatherView>(nav); }},
+ 
+     /* TX ********************************************************************/
+-    {"aprstx", "APRS TX", TX, ui::Color::green(), &bitmap_icon_aprs, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<APRSTXView>(nav); }},
+-    {"bletx", "BLE Tx", TX, ui::Color::green(), &bitmap_icon_btle, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<BLETxView>(nav); }},
++    // ARFPORT_REMOVED: {"aprstx", "APRS TX", TX, ui::Color::green(), &bitmap_icon_aprs, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<APRSTXView>(nav); }},
++    // ARFPORT_REMOVED: {"bletx", "BLE Tx", TX, ui::Color::green(), &bitmap_icon_btle, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<BLETxView>(nav); }},
+     {"ooktx", "OOK", TX, ui::Color::yellow(), &bitmap_icon_remote, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<EncodersView>(nav); }},
+-    {"rdstx", "RDS", TX, ui::Color::green(), &bitmap_icon_rds, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<RDSView>(nav); }},
+-    {"touchtune", "TouchTune", TX, ui::Color::green(), &bitmap_icon_touchtunes, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TouchTunesView>(nav); }},
++    // ARFPORT_REMOVED: {"rdstx", "RDS", TX, ui::Color::green(), &bitmap_icon_rds, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<RDSView>(nav); }},
++    // ARFPORT_REMOVED: {"touchtune", "TouchTune", TX, ui::Color::green(), &bitmap_icon_touchtunes, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TouchTunesView>(nav); }},
+ 
+     /* TRX ********************************************************************/
+-    {"microphone", "Mic", TRX, Color::green(), &bitmap_icon_microphone, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<MicTXView>(nav); }},
++    // ARFPORT_REMOVED: {"microphone", "Mic", TRX, Color::green(), &bitmap_icon_microphone, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<MicTXView>(nav); }},
+ 
+     /* UTILITIES *************************************************************/
+     {"filemanager", "File Manager", UTILITIES, Color::green(), &bitmap_icon_dir, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<FileManagerView>(nav); }},
+     {"freqman", "Freq. Manager", UTILITIES, Color::green(), &bitmap_icon_freqman, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<FrequencyManagerView>(nav); }},
+     {"iqtrim", "IQ Trim", UTILITIES, Color::orange(), &bitmap_icon_trim, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<IQTrimView>(nav); }},
+-    {"notepad", "Notepad", UTILITIES, Color::dark_cyan(), &bitmap_icon_notepad, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TextEditorView>(nav); }},
+-    {nullptr, "Debug", UTILITIES, Color::light_grey(), &bitmap_icon_debug, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<DebugMenuView>(nav); }},
++    // ARFPORT_REMOVED: {"notepad", "Notepad", UTILITIES, Color::dark_cyan(), &bitmap_icon_notepad, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<TextEditorView>(nav); }},
++    // ARFPORT_REMOVED: {nullptr, "Debug", UTILITIES, Color::light_grey(), &bitmap_icon_debug, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<DebugMenuView>(nav); }},
+     // Dangerous apps.
+     {nullptr, "Flash Utility", UTILITIES, Color::red(), &bitmap_icon_peripherals_details, [](NavigationView& nav) -> std::unique_ptr<View> { return std::make_unique<FlashUtilityView>(nav); }},
+ };
+@@ -910,7 +913,7 @@ SystemMenuView::SystemMenuView(NavigationView& nav)
+ 
+ void SystemMenuView::on_populate() {
+     add_apps(nav_, *this, HOME);
+-    add_external_items(nav_, app_location_t::HOME, *this, 0);
++    add_external_items(nav_, app_location_t::HOME, *this, 0, false);
+     add_item({"HackRF", Theme::getInstance()->fg_cyan->foreground, &bitmap_icon_hackrf, [this]() { hackrf_mode(nav_); }});
+ }
+ 
+diff --git a/firmware/baseband/CMakeLists.txt b/firmware/baseband/CMakeLists.txt
+index b0b83620..ae10c5b9 100644
+--- a/firmware/baseband/CMakeLists.txt
++++ b/firmware/baseband/CMakeLists.txt
+@@ -326,7 +326,7 @@ set(MODE_FLAGS "-O3")
+ set(MODE_CPPSRC
+ 	proc_adsbrx.cpp
+ )
+-DeclareTargets(PADR adsbrx)
++#ARFPORT_STRIP DeclareTargets(PADR adsbrx)
+ 
+ 
+ ### AFSK TX
+@@ -334,14 +334,14 @@ DeclareTargets(PADR adsbrx)
+ set(MODE_CPPSRC
+ 	proc_afsk.cpp
+ )
+-DeclareTargets(PAFT afsktx)
++#ARFPORT_STRIP DeclareTargets(PAFT afsktx)
+ 
+ ### APRS RX
+ 
+ set(MODE_CPPSRC
+ 	proc_aprsrx.cpp
+ )
+-DeclareTargets(PAPR aprsrx)
++#ARFPORT_STRIP DeclareTargets(PAPR aprsrx)
+ 
+ 
+ ### BTLE RX
+@@ -349,28 +349,28 @@ DeclareTargets(PAPR aprsrx)
+ set(MODE_CPPSRC
+ 	proc_btlerx.cpp
+ )
+-DeclareTargets(PBTR btlerx)
++#ARFPORT_STRIP DeclareTargets(PBTR btlerx)
+ 
+ ### BTLE TX
+ 
+ set(MODE_CPPSRC
+ 	proc_ble_tx.cpp
+ )
+-DeclareTargets(PBTT btletx)
++#ARFPORT_STRIP DeclareTargets(PBTT btletx)
+ 
+ ### AIS
+ 
+ set(MODE_CPPSRC
+ 	proc_ais.cpp
+ )
+-DeclareTargets(PAIS ais)
++#ARFPORT_STRIP DeclareTargets(PAIS ais)
+ 
+ ### AM Audio
+ 
+ set(MODE_CPPSRC
+ 	proc_am_audio.cpp
+ )
+-DeclareTargets(PAMA am_audio)
++#ARFPORT_STRIP DeclareTargets(PAMA am_audio)
+ 
+ 
+ ### Capture
+@@ -380,40 +380,47 @@ set(MODE_CPPSRC
+ )
+ DeclareTargets(PCAP capture)
+ 
++### ERT
++
++set(MODE_CPPSRC
++	proc_ert.cpp
++)
++#ARFPORT_STRIP DeclareTargets(PERT ert)
++
+ ### Radiosonde
+ 
+ set(MODE_CPPSRC
+ 	proc_sonde.cpp
+ )
+-DeclareTargets(PSON sonde)
++#ARFPORT_STRIP DeclareTargets(PSON sonde)
+ 
+ ### FSK RX
+ 
+ set(MODE_CPPSRC
+ 	proc_fsk_rx.cpp
+ )
+-DeclareTargets(PFSR fskrx)
++#ARFPORT_STRIP DeclareTargets(PFSR fskrx)
+ 
+ ### FSK TX
+ 
+ set(MODE_CPPSRC
+ 	proc_fsk.cpp
+ )
+-DeclareTargets(PFSK fsktx)
++#ARFPORT_STRIP DeclareTargets(PFSK fsktx)
+ 
+ ### Microphone transmit
+ 
+ set(MODE_CPPSRC
+ 	proc_mictx.cpp
+ )
+-DeclareTargets(PMTX mic_tx)
++#ARFPORT_STRIP DeclareTargets(PMTX mic_tx)
+ 
+ ### NFM Audio
+ 
+ set(MODE_CPPSRC
+ 	proc_nfm_audio.cpp
+ )
+-DeclareTargets(PNFM nfm_audio)
++#ARFPORT_STRIP DeclareTargets(PNFM nfm_audio)
+ 
+ ### OOK
+ 
+@@ -428,14 +435,14 @@ DeclareTargets(POOK ook)
+ set(MODE_CPPSRC
+ 	proc_pocsag2.cpp
+ )
+-DeclareTargets(PPO2 pocsag2)
++#ARFPORT_STRIP DeclareTargets(PPO2 pocsag2)
+ 
+ ### RDS
+ 
+ set(MODE_CPPSRC
+ 	proc_rds.cpp
+ )
+-DeclareTargets(PRDS rds)
++#ARFPORT_STRIP DeclareTargets(PRDS rds)
+ 
+ ### Replay
+ 
+@@ -445,6 +452,13 @@ set(MODE_CPPSRC
+ DeclareTargets(PREP replay)
+ 
+ 
++### Tones
++
++set(MODE_CPPSRC
++	proc_tones.cpp
++)
++#ARFPORT_STRIP DeclareTargets(PTON tones)
++
+ 
+ ### Wideband Spectrum
+ 
+@@ -459,7 +473,7 @@ DeclareTargets(PSPE wideband_spectrum)
+ set(MODE_CPPSRC
+ 	proc_wfm_audio.cpp
+ )
+-DeclareTargets(PWFM wfm_audio)
++#ARFPORT_STRIP DeclareTargets(PWFM wfm_audio)
+ 
+ ### SubGhz Decoders
+ 
+@@ -473,7 +487,7 @@ DeclareTargets(PSGD subghzd)
+ set(MODE_CPPSRC
+ 	proc_weather.cpp
+ )
+-DeclareTargets(PWTH weather)
++#ARFPORT_STRIP DeclareTargets(PWTH weather)
+ 
+ set(MODE_FLAGS "-Os")
+ 
+@@ -497,14 +511,14 @@ set(MODE_FLAGS "-O3")
+ set(MODE_CPPSRC
+ 	proc_flex.cpp
+ )
+-DeclareTargets(PFLX flex)
++#ARFPORT_STRIP DeclareTargets(PFLX flex)
+ 
+ ### ACARS RX
+ 
+ set(MODE_CPPSRC
+ 	proc_acars.cpp
+ )
+-DeclareTargets(PACA acars)
++#ARFPORT_STRIP DeclareTargets(PACA acars)
+ 
+ 
+ ### AFSK RX
+@@ -512,21 +526,21 @@ DeclareTargets(PACA acars)
+ set(MODE_CPPSRC
+ 	proc_afskrx.cpp
+ )
+-DeclareTargets(PAFR afskrx)
++#ARFPORT_STRIP DeclareTargets(PAFR afskrx)
+ 
+ ### EPIRB
+ 
+ set(MODE_CPPSRC
+ 	proc_epirb.cpp
+ )
+-DeclareTargets(PEPI epirb_rx)
++#ARFPORT_STRIP DeclareTargets(PEPI epirb_rx)
+ 
+ ### EPIRB TX
+ 
+ set(MODE_CPPSRC
+ 	proc_epirb_tx.cpp
+ )
+-DeclareTargets(PEPT epirb_tx)
++#ARFPORT_STRIP DeclareTargets(PEPT epirb_tx)
+ 
+ 
+ ### P25 TX
+@@ -534,7 +548,7 @@ DeclareTargets(PEPT epirb_tx)
+ set(MODE_CPPSRC
+ 	proc_p25_tx.cpp
+ )
+-DeclareTargets(P25T p25_tx)
++#ARFPORT_STRIP DeclareTargets(P25T p25_tx)
+ 
+ 
+ ### NRF RX
+@@ -542,35 +556,35 @@ DeclareTargets(P25T p25_tx)
+ set(MODE_CPPSRC
+ 	proc_nrfrx.cpp
+ )
+-DeclareTargets(PNRR nrfrx)
++#ARFPORT_STRIP DeclareTargets(PNRR nrfrx)
+ 
+ ### Jammer
+ 
+ set(MODE_CPPSRC
+ 	proc_jammer.cpp
+ )
+-DeclareTargets(PJAM jammer)
++#ARFPORT_STRIP DeclareTargets(PJAM jammer)
+ 
+ ### AM TV
+ 
+ set(MODE_CPPSRC
+ 	proc_am_tv.cpp
+ )
+-DeclareTargets(PAMT am_tv)
++#ARFPORT_STRIP DeclareTargets(PAMT am_tv)
+ 
+ ### GPS Simulator
+ 
+ set(MODE_CPPSRC
+ 	proc_gps_sim.cpp
+ )
+-DeclareTargets(PGPS gps_sim)
++#ARFPORT_STRIP DeclareTargets(PGPS gps_sim)
+ 
+ ### Spectrum painter
+ 
+ set(MODE_CPPSRC
+ 	proc_spectrum_painter.cpp
+ )
+-DeclareTargets(PSPT spectrum_painter)
++#ARFPORT_STRIP DeclareTargets(PSPT spectrum_painter)
+ 
+ ### Test
+ 
+@@ -584,7 +598,7 @@ DeclareTargets(PTST test)
+ set(MODE_CPPSRC
+ 	proc_audio_beep.cpp
+ )
+-DeclareTargets(PABP audio_beep)
++#ARFPORT_STRIP DeclareTargets(PABP audio_beep)
+ 
+ 
+ ### ProtoView
+@@ -592,7 +606,7 @@ DeclareTargets(PABP audio_beep)
+ set(MODE_CPPSRC
+ 	proc_protoview.cpp
+ )
+-DeclareTargets(PPVW protoview)
++#ARFPORT_STRIP DeclareTargets(PPVW protoview)
+ 
+ 
+ ### SSTV TX
+@@ -600,14 +614,14 @@ DeclareTargets(PPVW protoview)
+ set(MODE_CPPSRC
+ 	proc_sstvtx.cpp
+ )
+-DeclareTargets(PSTX sstvtx)
++#ARFPORT_STRIP DeclareTargets(PSTX sstvtx)
+ 
+ ### SSTV RX
+ 
+ set(MODE_CPPSRC
+ 	proc_sstvrx.cpp
+ )
+-DeclareTargets(PSRX sstvrx)
++#ARFPORT_STRIP DeclareTargets(PSRX sstvrx)
+ 
+ ### TPMS
+ 
+@@ -622,7 +636,7 @@ DeclareTargets(PTPM tpms)
+ set(MODE_CPPSRC
+ 	proc_adsbtx.cpp
+ )
+-DeclareTargets(PADT adsbtx)
++#ARFPORT_STRIP DeclareTargets(PADT adsbtx)
+ 
+ ### Binary Timed stream TX
+ 
+@@ -637,7 +651,7 @@ DeclareTargets(POSK bintstream)
+ set(MODE_CPPSRC
+ 	proc_siggen.cpp
+ )
+-DeclareTargets(PSIG siggen)
++#ARFPORT_STRIP DeclareTargets(PSIG siggen)
+ 
+ 
+ ### WeFax Rx
+@@ -645,7 +659,7 @@ DeclareTargets(PSIG siggen)
+ set(MODE_CPPSRC
+ 	proc_wefaxrx.cpp
+ )
+-DeclareTargets(PWFX wefaxrx)
++#ARFPORT_STRIP DeclareTargets(PWFX wefaxrx)
+ 
+ 
+ ### NoaaApt Rx
+@@ -653,36 +667,35 @@ DeclareTargets(PWFX wefaxrx)
+ set(MODE_CPPSRC
+ 	proc_noaaapt_rx.cpp
+ )
+-DeclareTargets(PNOA noaaapt_rx)
++#ARFPORT_STRIP DeclareTargets(PNOA noaaapt_rx)
+ 
+ ### Audio transmit
+ 
+ set(MODE_CPPSRC
+ 	proc_audiotx.cpp
+ )
+-DeclareTargets(PATX audio_tx)
++#ARFPORT_STRIP DeclareTargets(PATX audio_tx)
+ 
+ ### SubCar Decoders
+ 
+ set(MODE_CPPSRC
+ 	proc_subcar.cpp
+ )
++set(add_to_firmware TRUE)
+ DeclareTargets(PSCD subcar)
++set(add_to_firmware FALSE)
+ 
+-### Tone Detect RX
+-
+-set(MODE_CPPSRC
+-    proc_tonedetect.cpp
++set(BASEBAND_SRC_subcar_app
++	proc_subcar_app.cpp
+ )
+-DeclareTargets(PTNE tonedetect)
+-
++#DeclareTargets(ARFC subcar_app)
+ 
+ ### Morse RX Decoder
+ 
+ set(MODE_CPPSRC
+     proc_morse.cpp
+ )
+-DeclareTargets(PMRS morse)
++#ARFPORT_STRIP DeclareTargets(PMRS morse)
+ 
+ 
+ ### RTTY RX
+@@ -690,16 +703,7 @@ DeclareTargets(PMRS morse)
+ set(MODE_CPPSRC
+     proc_rtty_rx.cpp
+ )
+-DeclareTargets(PRTR rtty_rx)
+-
+-
+-
+-### ERT
+-
+-set(MODE_CPPSRC
+-	proc_ert.cpp
+-)
+-DeclareTargets(PERT ert)
++#ARFPORT_STRIP DeclareTargets(PRTR rtty_rx)
+ 
+ 
+ ### RTTY TX
+@@ -707,7 +711,7 @@ DeclareTargets(PERT ert)
+ set(MODE_CPPSRC
+     proc_rtty_tx.cpp
+ )
+-DeclareTargets(PRTT rtty_tx)
++#ARFPORT_STRIP DeclareTargets(PRTT rtty_tx)
+ 
+ ### SD over USB
+ 
+@@ -722,16 +726,7 @@ set(MODE_INCDIR
+ set(MODE_CPPSRC
+     proc_morsetx.cpp
+ )
+-DeclareTargets(PMRT morsetx)
+-
+-### Tones
+-
+-set(MODE_CPPSRC
+-	proc_tones.cpp
+-)
+-DeclareTargets(PTON tones)
+-
+-
++#ARFPORT_STRIP DeclareTargets(PMRT morsetx)
+ 
+ ### Time Sink
+ 
+@@ -758,8 +753,8 @@ set(MODE_CPPSRC
+ 	${HACKRF_PATH}/firmware/common/usb_request.c
+ 	${HACKRF_PATH}/firmware/common/usb_standard_request.c
+ 	${HACKRF_PATH}/firmware/common/platform_detect.c
+-	${HACKRF_PATH}/firmware/common/platform_gpio.c
+-	${HACKRF_PATH}/firmware/common/platform_scu.c
++        ${HACKRF_PATH}/firmware/common/platform_scu.c
++        ${HACKRF_PATH}/firmware/common/platform_gpio.c
+ 	${HACKRF_PATH}/firmware/common/gpio_lpc.c
+ 	${HACKRF_PATH}/firmware/common/firmware_info.c
+ 	${HACKRF_PATH}/firmware/common/si5351c.c
+@@ -784,7 +779,7 @@ set(MODE_CPPSRC
+ )
+ # sd_over_usb has type conflicts with PRALINE (HackRF Pro) - disable for now
+ if(NOT BOARD STREQUAL "PRALINE")
+-DeclareTargets(PUSB sd_over_usb)
++#DeclareTargets(PUSB sd_over_usb)
+ endif()
+ 
+ 

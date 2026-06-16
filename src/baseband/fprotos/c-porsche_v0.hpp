@@ -85,7 +85,7 @@ class FProtoSubCarPorscheV0 : public FProtoSubCarBase {
                     decode_count_bit++;
                     if (decode_count_bit >= PORSCHE_V0_BIT_COUNT) {
                         data_count_bit = PORSCHE_V0_BIT_COUNT;
-                        if (callback) callback(this);
+                        if (callback) fire_callback();
                         parser_step = PorscheV0StepReset;
                     }
                 } else {

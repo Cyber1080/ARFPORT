@@ -60,7 +60,7 @@ class FProtoSubCarKiaV3V4 : public FProtoSubCarBase {
         decode_data2 = btn;
         data_count_bit = decode_count_bit;
         if (callback)
-            callback(this);
+            fire_callback();
         // uint8_t our_serial_lsb = serial & 0xFF;
 
         // Decrypt --skipped, no keeloq decoding

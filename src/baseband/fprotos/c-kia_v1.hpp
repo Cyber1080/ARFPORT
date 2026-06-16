@@ -73,7 +73,7 @@ class FProtoSubCarKiaV1 : public FProtoSubCarBase {
                     // instance->generic.data = decode_data;
                     data_count_bit = decode_count_bit;
                     if (callback)
-                        callback(this);
+                        fire_callback();
 
                     decode_data = 0;
                     decode_count_bit = 0;

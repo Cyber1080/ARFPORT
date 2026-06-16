@@ -67,7 +67,7 @@ class FProtoSubCarStarLine : public FProtoSubCarBase {
                             if(decode_data != raw_decode_data) {
                                 decode_data = raw_decode_data;
                                 data_count_bit = STAR_LINE_MIN_BITS;
-                                if(callback) callback(this);
+                                if(callback) fire_callback();
                             }
                         }
                         raw_decode_data = 0;

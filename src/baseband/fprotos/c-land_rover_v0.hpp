@@ -87,7 +87,7 @@ class FProtoSubCarLandRoverV0 : public FProtoSubCarBase {
                 }
                 if(bit_count == LAND_ROVER_V0_MIN_BITS) {
                     if(finish_frame()) {
-                        if(callback) callback(this);
+                        if(callback) fire_callback();
                     }
                     parser_step = LandRoverV0StepReset;
                 }

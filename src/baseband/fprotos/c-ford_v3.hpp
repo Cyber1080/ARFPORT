@@ -124,6 +124,6 @@ class FProtoSubCarFordV3 : public FProtoSubCarBase {
             decode_data2 = (decode_data2 << 8) | raw_bytes[i];
 
         data_count_bit = FORD_V3_DATA_BITS;
-        if(callback) callback(this);
+        if(callback) fire_callback();
     }
 };

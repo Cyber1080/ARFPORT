@@ -90,7 +90,7 @@ class FProtoSubCarKiaV2 : public FProtoSubCarBase {
                         // instance->generic.cnt = ((raw_count >> 4) | (raw_count << 8)) & 0xFFF;
 
                         if (callback)
-                            callback(this);
+                            fire_callback();
 
                         decode_data = 0;
                         decode_count_bit = 0;

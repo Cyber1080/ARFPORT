@@ -134,6 +134,6 @@ class FProtoSubCarChryslerV0 : public FProtoSubCarBase {
             decode_data = (decode_data << 8) | d[i];
         decode_data2 = ((uint64_t)d[8] << 8) | d[9];
         data_count_bit = CHRYSLER_DATA_BITS;
-        if (callback) callback(this);
+        if (callback) fire_callback();
     }
 };

@@ -126,7 +126,7 @@ class FProtoSubCarBMWV0 : public FProtoSubCarBase {
                             }
 
                             if (crc_type != 0 && callback) {
-                                callback(this);
+                                fire_callback();
                             }
                         }
                         subghz_protocol_decoder_bmw_reset_internal();
@@ -160,4 +160,15 @@ class FProtoSubCarBMWV0 : public FProtoSubCarBase {
                         subghz_protocol_blocks_add_bit(1);
                         parser_step = BMWDecoderStepSaveDuration;
                     } else {
-                        
+                        parser_step = BMWDecoderStepReset;
+                    }
+                } else {
+                    parser_step = BMWDecoderStepReset;
+                }
+                break;
+        }
+    }
+
+    uint16_t header_count = 0;
+    uint8_t crc_type = 0;
+};

@@ -29,7 +29,9 @@
 using namespace portapack;
 using namespace ui;
 
-namespace ui::external_app::subcarrx {
+#pragma GCC optimize("Os")  // MEASURE: size-optimize the M4 UI code to fit the 32KB region
+
+namespace ui::subcarrx {
 
 std::string SubCarRecentEntry::to_csv() {
     std::string csv = ";";
@@ -94,7 +96,7 @@ SubCarView::SubCarView(NavigationView& nav)
                   &options_mode,
                   &recent_entries_view});
 
-    baseband::run_prepared_image(portapack::memory::map::m4_code.base());
+    baseband::run_image(portapack::spi_flash::image_tag_subcar);
     logger = std::make_unique<SubCarLogger>();
 
     button_clear_list.on_select = [this](Button&) {
@@ -229,8 +231,8 @@ const char* SubCarView::getSensorTypeName(FPROTO_SUBCAR_SENSOR type) {
 }
 
 std::string SubCarView::pad_string_with_spaces(int snakes) {
-    std::string paddedStr(snakes, ' ');
-    return paddedStr;
+    if (snakes <= 0) return std::string();  // guard: negative/underflow would allocate a huge string and crash
+    return std::string(snakes, ' ');
 }
 
 void SubCarView::on_freqchg(int64_t freq) {
@@ -356,7 +358,7 @@ void SubCarRecentEntryDetailView::parseProtocol() {
         }
     }
     if (entry_.sensorType == FPC_SUBARU) {
-        uint8_t* data_bytes = (uint8_t*)entry_.data;
+        uint8_t* data_bytes = (uint8_t*)&entry_.data;
         serial = ((uint32_t)data_bytes[1] << 16) | ((uint32_t)data_bytes[2] << 8) | data_bytes[3];
         uint8_t button = data_bytes[0] & 0x0F;
         btn = to_string_dec_uint(button);
@@ -629,12 +631,12 @@ void SubCarRecentEntryDetailView::parseProtocol() {
     return;
 }
 
-}  // namespace ui::external_app::subcarrx
+}  // namespace ui::subcarrx
 
 namespace ui {
 
 template <>
-void RecentEntriesTable<ui::external_app::subcarrx::SubCarRecentEntries>::draw(
+void RecentEntriesTable<ui::subcarrx::SubCarRecentEntries>::draw(
     const Entry& entry,
     const Rect& target_rect,
     Painter& painter,
@@ -643,13 +645,13 @@ void RecentEntriesTable<ui::external_app::subcarrx::SubCarRecentEntries>::draw(
     std::string line{};
     line.reserve(30);
 
-    line = ui::external_app::subcarrx::SubCarView::getSensorTypeName((FPROTO_SUBCAR_SENSOR)entry.sensorType);
+    line = ui::subcarrx::SubCarView::getSensorTypeName((FPROTO_SUBCAR_SENSOR)entry.sensorType);
     line = line + " " + to_string_hex(entry.data << 32);
     line.resize(columns.at(0).second, ' ');
     std::string ageStr = to_string_dec_uint(entry.age);
     std::string bitsStr = to_string_dec_uint(entry.bits);
-    line += ui::external_app::subcarrx::SubCarView::pad_string_with_spaces(5 - bitsStr.length()) + bitsStr;
-    line += ui::external_app::subcarrx::SubCarView::pad_string_with_spaces(4 - ageStr.length()) + ageStr;
+    line += ui::subcarrx::SubCarView::pad_string_with_spaces(5 - (int)bitsStr.length()) + bitsStr;
+    line += ui::subcarrx::SubCarView::pad_string_with_spaces(4 - (int)ageStr.length()) + ageStr;
 
     line.resize(target_rect.width() / 8, ' ');
     painter.draw_string(target_rect.location(), style, line);

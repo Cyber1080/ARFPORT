@@ -63,7 +63,7 @@ class FProtoSubCarVW : public FProtoSubCarBase {
         data_count_bit++;
         if (data_count_bit >= min_count_bit_for_found) {
             if (callback) {
-                callback(this);
+                fire_callback();
             }
         }
     }

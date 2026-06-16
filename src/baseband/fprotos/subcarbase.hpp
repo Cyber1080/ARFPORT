@@ -23,6 +23,16 @@ class FProtoSubCarBase {
     virtual void feed(bool level, uint32_t duration) = 0;                        // need to be implemented on each protocol handler.
     void setCallback(SubCarProtocolDecoderBaseRxCallback cb) { callback = cb; }  // this is called when there is a hit.
 
+    // Safe callback invocation: guards against corrupted function pointers.
+    // callback must be non-null AND a valid code VMA (< 0x8000) to be called.
+    void fire_callback() {
+        if (!callback) return;
+        // callbackTarget VMA is ~0x5414; block anything outside code range.
+        const uint32_t cbaddr = reinterpret_cast<uint32_t>(callback);
+        if (cbaddr < 0x1000u || cbaddr >= 0x5D00u) return;
+        callback(this);
+    }
+
     // General data holder, these will be passed
     uint8_t sensorType = FPC_Invalid;
     uint16_t data_count_bit = 0;

@@ -101,7 +101,7 @@ class FProtoSubCarKiaV7 : public FProtoSubCarBase {
                     if (hdr == KIA_V7_HEADER && crc_ok(candidate)) {
                         decode_data = candidate;
                         data_count_bit = KIA_V7_KEY_BITS;
-                        if (callback) callback(this);
+                        if (callback) fire_callback();
                     }
                     parser_step = KiaV7StepReset;
                     FProtoGeneral::manchester_advance(manchester_state, ManchesterEventReset,

@@ -74,7 +74,7 @@ class FProtoSubCarKiaV0 : public FProtoSubCarBase {
                             // }
 
                             if (callback)
-                                callback(this);
+                                fire_callback();
                         } else {
                             // FURI_LOG_E(TAG, "Incomplete signal: only %u bits", instance->decoder.decode_count_bit);
                         }

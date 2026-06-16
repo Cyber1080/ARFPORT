@@ -87,7 +87,7 @@ class FProtoSubCarMazdaV0 : public FProtoSubCarBase {
                         // Validate checksum: sum of bytes 0-6 == byte 7
                         if (checksum_ok(decode_data)) {
                             data_count_bit = (uint16_t)decode_count_bit;
-                            if (callback) callback(this);
+                            if (callback) fire_callback();
                         }
                         decode_data = 0;
                         decode_count_bit = 0;

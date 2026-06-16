@@ -43,7 +43,7 @@
 
 using namespace ui;
 
-namespace ui::external_app::subcarrx {
+namespace ui::subcarrx {
 
 struct SubCarRecentEntry {
     using Key = uint64_t;
@@ -223,6 +223,6 @@ class SubCarRecentEntryDetailView : public View {
     void parseProtocol();
 };
 
-}  // namespace ui::external_app::subcarrx
+}  // namespace ui::subcarrx
 
 #endif /*__UI_SubCar_H__*/

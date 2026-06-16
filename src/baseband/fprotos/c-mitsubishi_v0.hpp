@@ -115,6 +115,6 @@ class FProtoSubCarMitsubishiV0 : public FProtoSubCarBase {
             decode_data2 = (decode_data2 << 8) | payload[i];
 
         data_count_bit = bit_count;
-        if (callback) callback(this);
+        if (callback) fire_callback();
     }
 };

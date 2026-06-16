@@ -218,6 +218,6 @@ class FProtoSubCarHondaStatic : public FProtoSubCarBase {
         decode_data = pack_compact(button, serial, counter);
         decode_data2 = 0;
         data_count_bit = HONDA_STATIC_BIT_COUNT;
-        if(callback) callback(this);
+        if(callback) fire_callback();
     }
 };

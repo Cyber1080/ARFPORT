@@ -133,7 +133,7 @@ class FProtoSubCarFiatV1 : public FProtoSubCarBase {
                         uint8_t calc = crc8(raw_bytes, 12);
                         if (calc == raw_bytes[12]) {
                             data_count_bit = FIAT_V1_DATA_BITS;
-                            if (callback) callback(this);
+                            if (callback) fire_callback();
                         }
                     }
                     parser_step = FiatV1StepReset;

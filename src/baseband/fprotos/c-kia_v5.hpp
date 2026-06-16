@@ -88,7 +88,7 @@ class FProtoSubCarKiaV5 : public FProtoSubCarBase {
                         // instance->generic.data = instance->decode_data2;
                         data_count_bit = (decode_count_bit > 67) ? 67 : decode_count_bit;
                         if (callback)
-                            callback(this);
+                            fire_callback();
                     }
 
                     parser_step = KiaV5DecoderStepReset;

@@ -142,7 +142,7 @@ class FProtoSubCarHonda : public FProtoSubCarBase {
         honda_push_bits(first_level, sym);
         if (decode_count_bit >= HONDA_BITS) {
             data_count_bit = decode_count_bit;
-            if (callback) callback(this);
+            if (callback) fire_callback();
             honda_reset();
         }
     }
@@ -223,7 +223,7 @@ class FProtoSubCarHonda : public FProtoSubCarBase {
                 honda_push_bits(level, symbols);
                 if (decode_count_bit >= HONDA_BITS) {
                     data_count_bit = decode_count_bit;
-                    if (callback) callback(this);
+                    if (callback) fire_callback();
                     honda_reset();
                 }
                 break;

@@ -87,7 +87,7 @@ class SubCarProcessor : public BasebandProcessor {
 
     uint8_t modulation = 0;  // 0 am, 1 fm
 
-    FProtoListGeneral* protoList = new SubCarProtos();  // holds all the protocols we can parse
+    SubCarProtos protoList{};  // holds all protocols — direct member, no heap allocation
     void configure(const SubGhzFPRxConfigureMessage& message);
 
     /* NB: Threads should be the last members in the class definition. */

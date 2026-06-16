@@ -60,7 +60,7 @@ class FProtoSubCarSubaru : public FProtoSubCarBase {
         // subaru_decode_count(b, &cnt);
         data_count_bit = bit_count;
         if (callback) {
-            callback(this);
+            fire_callback();
         }
         return true;
     }

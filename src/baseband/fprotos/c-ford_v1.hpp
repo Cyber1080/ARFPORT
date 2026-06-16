@@ -232,7 +232,7 @@ class FProtoSubCarFordV1 : public FProtoSubCarBase {
             decode_data2 = (decode_data2 << 8) | raw[i];
 
         data_count_bit = FORD_V1_DATA_BITS;
-        if (callback) callback(this);
+        if (callback) fire_callback();
         return true;
     }
 

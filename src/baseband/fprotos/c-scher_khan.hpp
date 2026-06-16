@@ -76,7 +76,7 @@ class FProtoSubCarScherKhan : public FProtoSubCarBase {
                         if(bit_count_local >= SCHER_KHAN_MIN_BITS) {
                             decode_data = raw_decode_data;
                             data_count_bit = bit_count_local;
-                            if(callback) callback(this);
+                            if(callback) fire_callback();
                         }
                         raw_decode_data = 0;
                         bit_count_local = 0;

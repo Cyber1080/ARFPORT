@@ -73,7 +73,7 @@ class FProtoSubCarHyundaiKiaV0 : public FProtoSubCarBase {
                     if (decode_count_bit == HKV0_DATA_BITS) {
                         if (checksum_ok(decode_data)) {
                             data_count_bit = HKV0_DATA_BITS;
-                            if (callback) callback(this);
+                            if (callback) fire_callback();
                         }
                         parser_step = HKV0StepReset;
                     }

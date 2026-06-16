@@ -117,7 +117,7 @@ class FProtoSubCarSuzuki : public FProtoSubCarBase {
                             instance->generic.cnt = (data_high << 4) >> 16;
 */
                             if (callback) {
-                                callback(this);
+                                fire_callback();
                             }
                         }
 

@@ -123,7 +123,7 @@ class FProtoSubCarFordV0 : public FProtoSubCarBase {
                          */
                         data_count_bit = 64;
                         if (callback) {
-                            callback(this);
+                            fire_callback();
                         }
 
                         data_low = 0;

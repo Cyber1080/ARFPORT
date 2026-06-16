@@ -81,7 +81,7 @@ class FProtoSubCarHyundaiSantaFeV0 : public FProtoSubCarBase {
                                 decode_data = (decode_data << 8) | raw_bytes[i];
                             decode_data2 = ((uint64_t)raw_bytes[8] << 8) | raw_bytes[9];
                             data_count_bit = SFE_DATA_BITS;
-                            if (callback) callback(this);
+                            if (callback) fire_callback();
                         }
                         parser_step = SFeV0StepReset;
                     }
