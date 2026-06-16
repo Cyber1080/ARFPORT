@@ -49,3 +49,9 @@ debug.txt
 *.py
 build_subghztx.sh
 build_subcar.sh
+
+# Large reference firmware trees (not source)
+Flipper-ARF-dev-ab66580/
+arf-d4c1-src/cache/
+# Captured fob signals (do not publish key data)
+*.sub
