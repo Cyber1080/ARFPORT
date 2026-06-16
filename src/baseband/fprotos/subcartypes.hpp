@@ -33,6 +33,7 @@ enum FPROTO_SUBCAR_SENSOR : uint8_t {
     FPC_SCHER_KHAN = 29,
     FPC_STAR_LINE = 30,
     FPC_HONDA_STATIC = 31,
+    FPC_TOYOTA = 32,
     FPC_COUNT
 };
 

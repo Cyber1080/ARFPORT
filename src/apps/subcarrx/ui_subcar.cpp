@@ -221,6 +221,8 @@ const char* SubCarView::getSensorTypeName(FPROTO_SUBCAR_SENSOR type) {
             return "Star Line";
         case FPC_HONDA_STATIC:
             return "Honda Static";
+        case FPC_TOYOTA:
+            return "Toyota";
             /* case FPC_KIAV6:
                  return "Kia V6";*/
 
@@ -522,6 +524,14 @@ void SubCarRecentEntryDetailView::parseProtocol() {
               (buf[6] << 8) |
               buf[7];
         btn = to_string_dec_uint(button);
+    }
+
+    if (entry_.sensorType == FPC_TOYOTA) {
+        // [63:32]=hop(rolling)  [31:4]=serial(28)  [3:0]=button ; data2: 0=Corolla433 1=Tundra315
+        serial = (uint32_t)((entry_.data >> 4) & 0x0FFFFFFF);
+        uint8_t button = (uint8_t)(entry_.data & 0x0F);
+        btn = to_string_dec_uint(button);
+        // KeeLoq hop code (no plain counter); model shown via data2
     }
 
     if (entry_.sensorType == FPC_FIATV0) {

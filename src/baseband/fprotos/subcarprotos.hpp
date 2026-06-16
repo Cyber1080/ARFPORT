@@ -40,6 +40,7 @@ So include here the .hpp, and add a new element to the protos vector in the cons
 // #include "c-scher_khan.hpp" // Russian alarm only
 // #include "c-star_line.hpp"  // Russian alarm only
 // #include "c-honda_static.hpp"  // very old Honda fixed-code only
+#include "c-toyota.hpp"   // Toyota KeeLoq (Corolla 433 / Tundra 315), decode-only
 
 #ifndef __FPROTO_PROTOLISTCAR_H__
 #define __FPROTO_PROTOLISTCAR_H__
@@ -76,6 +77,7 @@ class SubCarProtos : public FProtoListGeneral {
         protos[FPC_FORDV2]          = &obj_fordv2;
         protos[FPC_FORDV3]          = &obj_fordv3;
         protos[FPC_LAND_ROVER_V0]   = &obj_landrover;
+        protos[FPC_TOYOTA]          = &obj_toyota;
 
         for (uint8_t i = 0; i < FPC_COUNT; ++i) {
             if (protos[i] != NULL) protos[i]->setCallback(callbackTarget);
@@ -115,6 +117,7 @@ class SubCarProtos : public FProtoListGeneral {
         obj_fordv3.feed(level, duration);
         obj_fordv1.feed(level, duration);
         obj_landrover.feed(level, duration);
+        obj_toyota.feed(level, duration);
     }
 
    protected:
@@ -147,6 +150,7 @@ class SubCarProtos : public FProtoListGeneral {
     FProtoSubCarFordV2          obj_fordv2{};
     FProtoSubCarFordV3          obj_fordv3{};
     FProtoSubCarLandRoverV0     obj_landrover{};   // Land Rover
+    FProtoSubCarToyota          obj_toyota{};      // Toyota KeeLoq (Corolla/Tundra)
 };
 
 #endif
