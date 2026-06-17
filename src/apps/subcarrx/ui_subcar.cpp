@@ -297,7 +297,9 @@ void SubCarRecentEntryDetailView::stop_emulate() {
     console.writeln("Emulate: done");
 }
 
-void SubCarRecentEntryDetailView::on_tx_progress(bool done) {
+void SubCarRecentEntryDetailView::on_tx_progress(int progress, bool done) {
+    // DIAG: -2 replay cfg, -4 FIFO armed (tx_configured), -10 stream empty, 100 done
+    console.writeln("TXp:" + to_string_dec_int(progress) + (done ? " DONE" : ""));
     if (done && tx_running) stop_emulate();
 }
 

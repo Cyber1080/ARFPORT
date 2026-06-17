@@ -261,13 +261,17 @@ class SubCarRecentEntryDetailView : public View {
     std::unique_ptr<SubCarPulsePlayThread> play_thread{};
     void start_emulate();
     void stop_emulate();
-    void on_tx_progress(bool done);
-    void set_ready() { ready_signal = true; }
+    void on_tx_progress(int progress, bool done);
+    void set_ready() {
+        ready_signal = true;
+        console.writeln("FillReq");  // DIAG: RequestSignal reached app
+    }
 
     MessageHandlerRegistration handler_tx_progress{
         Message::ID::TXProgress,
         [this](const Message* const p) {
-            on_tx_progress(static_cast<const TXProgressMessage*>(p)->done);
+            const auto m = static_cast<const TXProgressMessage*>(p);
+            on_tx_progress(m->progress, m->done);
         }};
     MessageHandlerRegistration handler_fifo_signal{
         Message::ID::RequestSignal,
