@@ -38,12 +38,40 @@
 #include "utility.hpp"
 #include "log_file.hpp"
 #include "recent_entries.hpp"
+#include "baseband_api.hpp"
+#include "buffer_exchange.hpp"
 
 #include "../../baseband/fprotos/subcartypes.hpp"
+
+#include <vector>
+#include <functional>
 
 using namespace ui;
 
 namespace ui::subcarrx {
+
+#define SUBCAR_TX_SAMPLERATE 2280000U
+#define SUBCAR_TX_DEVIATION  60000U
+
+// Streams an in-memory signed-us pulse vector to the combined ARFC baseband TX.
+class SubCarPulsePlayThread {
+   public:
+    SubCarPulsePlayThread(std::vector<int32_t> pulses, size_t read_size, size_t buffer_count,
+                          bool* ready_signal, std::function<void(uint32_t)> done_cb);
+    ~SubCarPulsePlayThread();
+    SubCarPulsePlayThread(const SubCarPulsePlayThread&) = delete;
+    SubCarPulsePlayThread& operator=(const SubCarPulsePlayThread&) = delete;
+    enum { END_OF_PULSES = 0, TERMINATED = 1 };
+
+   private:
+    ReplayConfig config;
+    std::vector<int32_t> pulses_;
+    bool* ready_sig_;
+    std::function<void(uint32_t)> done_cb_;
+    Thread* thread_{nullptr};
+    static msg_t static_fn(void* arg);
+    uint32_t run();
+};
 
 struct SubCarRecentEntry {
     using Key = uint64_t;
@@ -220,7 +248,33 @@ class SubCarRecentEntryDetailView : public View {
         {screen_width - 96 - 4, screen_height - 32 - 12, 96, 32},
         "Done"};
 
+    Button button_emulate{
+        {4, screen_height - 32 - 12, 110, 32},
+        "Emulate TX"};
+
     void parseProtocol();
+
+    // ── Emulate (counter-sync TX) ──────────────────────────────────────────
+    bool tx_running{false};
+    bool ready_signal{false};
+    std::vector<int32_t> tx_pulses{};
+    std::unique_ptr<SubCarPulsePlayThread> play_thread{};
+    void start_emulate();
+    void stop_emulate();
+    void on_tx_progress(bool done);
+    void set_ready() { ready_signal = true; }
+
+    MessageHandlerRegistration handler_tx_progress{
+        Message::ID::TXProgress,
+        [this](const Message* const p) {
+            on_tx_progress(static_cast<const TXProgressMessage*>(p)->done);
+        }};
+    MessageHandlerRegistration handler_fifo_signal{
+        Message::ID::RequestSignal,
+        [this](const Message* const p) {
+            const auto m = static_cast<const RequestSignalMessage*>(p);
+            if (m->signal == RequestSignalMessage::Signal::FillRequest) set_ready();
+        }};
 };
 
 }  // namespace ui::subcarrx

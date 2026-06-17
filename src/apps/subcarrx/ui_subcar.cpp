@@ -63,6 +63,7 @@ SubCarRecentEntryDetailView::SubCarRecentEntryDetailView(NavigationView& nav, co
     : nav_{nav},
       entry_{entry} {
     add_children({&button_done,
+                  &button_emulate,
                   &text_type,
                   &text_id,
                   &console,
@@ -71,11 +72,232 @@ SubCarRecentEntryDetailView::SubCarRecentEntryDetailView(NavigationView& nav, co
     button_done.on_select = [&nav](const ui::Button&) {
         nav.pop();
     };
+    button_emulate.on_select = [this](const ui::Button&) {
+        if (tx_running) { stop_emulate(); return; }
+        if (entry_.sensorType == FPC_FORDV0) {
+            start_emulate();
+        } else {
+            console.writeln("Emulate: Ford V0 only (for now)");
+        }
+    };
     update_data();
 }
 
 void SubCarRecentEntryDetailView::focus() {
     button_done.focus();
+}
+
+// ===================================================================
+// Ford V0 counter-sync encoder (ported from D4C1/ARF ford_v0.c)
+// ===================================================================
+namespace {
+static const uint8_t ford_v0_crc_matrix[64] = {
+    0xDA, 0xB5, 0x55, 0x6A, 0xAA, 0xAA, 0xAA, 0xD5,
+    0xB6, 0x6C, 0xCC, 0xD9, 0x99, 0x99, 0x99, 0xB3,
+    0x71, 0xE3, 0xC3, 0xC7, 0x87, 0x87, 0x87, 0x8F,
+    0x0F, 0xE0, 0x3F, 0xC0, 0x7F, 0x80, 0x7F, 0x80,
+    0x00, 0x1F, 0xFF, 0xC0, 0x00, 0x7F, 0xFF, 0x80,
+    0x00, 0x00, 0x00, 0x3F, 0xFF, 0xFF, 0xFF, 0x80,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F,
+    0x23, 0x12, 0x94, 0x84, 0x35, 0xF4, 0x55, 0x84};
+
+static uint8_t fv0_popcount8(uint8_t x) {
+    uint8_t c = 0;
+    while (x) { c += x & 1; x >>= 1; }
+    return c;
+}
+static uint8_t fv0_calc_crc(uint8_t* buf) {
+    uint8_t crc = 0;
+    for (int row = 0; row < 8; row++) {
+        uint8_t xs = 0;
+        for (int col = 0; col < 8; col++)
+            xs ^= (ford_v0_crc_matrix[row * 8 + col] & buf[col + 1]);
+        if (fv0_popcount8(xs) & 1) crc |= (1 << row);
+    }
+    return crc;
+}
+static uint8_t fv0_crc_for_tx(uint64_t key1, uint8_t chk) {
+    uint8_t buf[16] = {0};
+    for (int i = 0; i < 8; ++i) buf[i] = (uint8_t)(key1 >> (56 - i * 8));
+    buf[8] = chk;
+    return fv0_calc_crc(buf) ^ 0x80;
+}
+static uint8_t fv0_chk_from_buf(uint8_t* buf) {
+    uint8_t s = 0;
+    for (int i = 1; i <= 7; i++) s += buf[i];
+    return s;
+}
+// Recover serial/button/count from a decoded key1/key2 (inverse of encode).
+static void fv0_decode(uint64_t key1, uint16_t key2, uint32_t* serial, uint8_t* button, uint32_t* count) {
+    uint8_t buf[13] = {0};
+    for (int i = 0; i < 8; ++i) buf[i] = (uint8_t)(key1 >> (56 - i * 8));
+    buf[8] = (uint8_t)(key2 >> 8);
+    buf[9] = (uint8_t)(key2 & 0xFF);
+    uint8_t tmp = buf[8], parity = 0, parity_any = (tmp != 0);
+    while (tmp) { parity ^= (tmp & 1); tmp >>= 1; }
+    buf[11] = parity_any ? parity : 0;
+    uint8_t xb, lim;
+    if (buf[11]) { xb = buf[7]; lim = 7; } else { xb = buf[6]; lim = 6; }
+    for (int i = 1; i < lim; ++i) buf[i] ^= xb;
+    if (buf[11] == 0) buf[7] ^= xb;
+    uint8_t ob7 = buf[7];
+    buf[7] = (ob7 & 0xAA) | (buf[6] & 0x55);
+    uint8_t mixed = (buf[6] & 0xAA) | (ob7 & 0x55);
+    buf[6] = mixed;
+    uint32_t sle = ((uint32_t)buf[1]) | ((uint32_t)buf[2] << 8) | ((uint32_t)buf[3] << 16) | ((uint32_t)buf[4] << 24);
+    *serial = ((sle & 0xFF) << 24) | (((sle >> 8) & 0xFF) << 16) | (((sle >> 16) & 0xFF) << 8) | ((sle >> 24) & 0xFF);
+    *button = (buf[5] >> 4) & 0x0F;
+    *count = ((buf[5] & 0x0F) << 16) | (buf[6] << 8) | buf[7];
+}
+static void fv0_encode(uint64_t orig_key1, uint32_t serial, uint8_t button, uint32_t count, uint8_t* chk_out, uint64_t* key1_out) {
+    uint8_t buf[13] = {0};
+    buf[0] = (uint8_t)(orig_key1 >> 56);
+    buf[1] = (serial >> 24) & 0xFF; buf[2] = (serial >> 16) & 0xFF;
+    buf[3] = (serial >> 8) & 0xFF;  buf[4] = serial & 0xFF;
+    buf[5] = (button << 4) | ((count >> 16) & 0x0F);
+    buf[6] = (count >> 8) & 0xFF;   buf[7] = count & 0xFF;
+    uint8_t checksum = fv0_chk_from_buf(buf);
+    uint8_t ob7 = buf[7], ob6 = buf[6];
+    buf[7] = (ob7 & 0xAA) | (ob6 & 0x55);
+    buf[6] = (ob6 & 0xAA) | (ob7 & 0x55);
+    *chk_out = checksum;
+    buf[8] = checksum;
+    uint8_t tmp = buf[8], parity = 0, parity_any = (tmp != 0);
+    while (tmp) { parity ^= (tmp & 1); tmp >>= 1; }
+    uint8_t b11 = parity_any ? parity : 0;
+    uint8_t xb, lim;
+    if (b11) { xb = buf[7]; lim = 7; } else { xb = buf[6]; lim = 6; }
+    if (b11 == 0) buf[7] ^= xb;
+    for (int i = 1; i < lim; i++) buf[i] ^= xb;
+    *key1_out = 0;
+    for (int i = 0; i < 8; i++) *key1_out = (*key1_out << 8) | buf[i];
+}
+
+// Build the OOK pulse stream (signed us: +high / -low) for counter+1 frame, N repeats.
+static std::vector<int32_t> build_ford_v0_pulses(uint64_t key1, uint16_t key2) {
+    uint32_t serial = 0, count = 0; uint8_t button = 0;
+    fv0_decode(key1, key2, &serial, &button, &count);
+    count = (count + 1) & 0xFFFFF;  // counter-sync increment
+    uint8_t chk = 0; uint64_t new_key1 = 0;
+    fv0_encode(key1, serial, button, count, &chk, &new_key1);
+    uint8_t crc = fv0_crc_for_tx(new_key1, chk);
+    uint16_t new_key2 = ((uint16_t)chk << 8) | crc;
+
+    const int32_t te_s = 250, te_l = 500, gap = 3500;
+    uint64_t k1_inv = ~new_key1;
+    uint16_t k2_inv = ~new_key2;
+    std::vector<int32_t> p;
+    p.reserve(900 * 5);
+    for (int rep = 0; rep < 5; rep++) {
+        for (int i = 0; i < 20; i++) { p.push_back(+te_s); p.push_back(-te_l); p.push_back(+te_l); }
+        p.push_back(+te_s);
+        p.push_back(-gap);
+        for (int i = 63; i >= 0; i--) {
+            if ((k1_inv >> i) & 1) { p.push_back(+te_s); p.push_back(-te_s); }
+            else { p.push_back(-te_s); p.push_back(+te_s); }
+        }
+        for (int i = 15; i >= 0; i--) {
+            if ((k2_inv >> i) & 1) { p.push_back(+te_s); p.push_back(-te_s); }
+            else { p.push_back(-te_s); p.push_back(+te_s); }
+        }
+        p.push_back(-20000);  // inter-frame gap
+    }
+    return p;
+}
+}  // namespace
+
+// ── SubCarPulsePlayThread (streams pulse vector to ARFC TX baseband) ──────────
+SubCarPulsePlayThread::SubCarPulsePlayThread(std::vector<int32_t> pulses, size_t read_size,
+                                             size_t buffer_count, bool* ready_signal,
+                                             std::function<void(uint32_t)> done_cb)
+    : config{read_size, buffer_count},
+      pulses_{std::move(pulses)},
+      ready_sig_{ready_signal},
+      done_cb_{std::move(done_cb)} {
+    thread_ = chThdCreateFromHeap(nullptr, 4 * 1024, NORMALPRIO, SubCarPulsePlayThread::static_fn, this);
+}
+SubCarPulsePlayThread::~SubCarPulsePlayThread() {
+    if (thread_) {
+        chThdTerminate(thread_);
+        if (thread_->p_refs) chThdWait(thread_);
+        thread_ = nullptr;
+    }
+}
+msg_t SubCarPulsePlayThread::static_fn(void* arg) {
+    auto self = static_cast<SubCarPulsePlayThread*>(arg);
+    auto rc = self->run();
+    if (self->done_cb_) self->done_cb_(rc);
+    chThdExit(0);
+    return 0;
+}
+uint32_t SubCarPulsePlayThread::run() {
+    struct BasebandReplay {
+        BasebandReplay(ReplayConfig* c) { baseband::replay_start(c); }
+    } replay{&config};
+    BufferExchange buffers{&config};
+    while (!(*ready_sig_) && !chThdShouldTerminate()) chThdSleep(100);
+    size_t cursor = 0;
+    while (!buffers.empty() && !chThdShouldTerminate()) {
+        auto buf = buffers.get_prefill();
+        if (buf == nullptr) { buffers.put_app(buf); continue; }
+        size_t slots = config.read_size / 4;
+        auto out = reinterpret_cast<int32_t*>(buf->data());
+        for (size_t i = 0; i < slots; i++) out[i] = (cursor < pulses_.size()) ? pulses_[cursor++] : 0;
+        buf->set_size(config.read_size);
+        buffers.put(buf);
+    }
+    baseband::set_fifo_data(nullptr);
+    size_t drain = 0;
+    while (!chThdShouldTerminate()) {
+        auto buf = buffers.get();
+        size_t slots = buf->capacity() / 4;
+        auto out = reinterpret_cast<int32_t*>(buf->data());
+        for (size_t i = 0; i < slots; i++) out[i] = (cursor < pulses_.size()) ? pulses_[cursor++] : 0;
+        buf->set_size(buf->capacity());
+        buffers.put(buf);
+        if (cursor >= pulses_.size()) { if (++drain >= config.buffer_count) return END_OF_PULSES; }
+    }
+    return TERMINATED;
+}
+
+// ── Emulate (counter-sync TX) ────────────────────────────────────────────────
+void SubCarRecentEntryDetailView::start_emulate() {
+    tx_pulses = build_ford_v0_pulses(entry_.data, (uint16_t)entry_.data2);
+    if (tx_pulses.empty()) { console.writeln("Emulate: encode failed"); return; }
+    console.writeln("TX Ford V0 cnt+1 (" + to_string_dec_uint(tx_pulses.size()) + ")");
+    button_emulate.set_text("Stop TX");
+    tx_running = true;
+    ready_signal = false;
+    receiver_model.disable();
+    baseband::set_subcar_app_mode(1);  // ARFC -> TX
+    transmitter_model.set_target_frequency(receiver_model.target_frequency());
+    transmitter_model.set_sampling_rate(SUBCAR_TX_SAMPLERATE);
+    transmitter_model.set_baseband_bandwidth(1'750'000);
+    transmitter_model.set_rf_amp(true);
+    transmitter_model.set_tx_gain(35);
+    transmitter_model.enable();
+    baseband::set_bitstream_config(SUBCAR_TX_DEVIATION, 0);  // 0 = OOK/AM
+    auto done_cb = [](uint32_t) {
+        TXProgressMessage m{};
+        m.done = true;
+        EventDispatcher::send_message(m);
+    };
+    play_thread = std::make_unique<SubCarPulsePlayThread>(tx_pulses, 1024, 4, &ready_signal, done_cb);
+}
+
+void SubCarRecentEntryDetailView::stop_emulate() {
+    transmitter_model.disable();
+    if (play_thread) play_thread.reset();
+    baseband::set_subcar_app_mode(0);  // ARFC -> RX
+    receiver_model.enable();
+    tx_running = false;
+    ready_signal = false;
+    button_emulate.set_text("Emulate TX");
+    console.writeln("Emulate: done");
+}
+
+void SubCarRecentEntryDetailView::on_tx_progress(bool done) {
+    if (done && tx_running) stop_emulate();
 }
 
 void SubCarView::focus() {
