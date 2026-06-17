@@ -187,8 +187,8 @@ static std::vector<int32_t> build_ford_v0_pulses(uint64_t key1, uint16_t key2) {
     uint64_t k1_inv = ~new_key1;
     uint16_t k2_inv = ~new_key2;
     std::vector<int32_t> p;
-    p.reserve(900 * 5);
-    for (int rep = 0; rep < 5; rep++) {
+    p.reserve(240 * 4);
+    for (int rep = 0; rep < 4; rep++) {
         for (int i = 0; i < 20; i++) { p.push_back(+te_s); p.push_back(-te_l); p.push_back(+te_l); }
         p.push_back(+te_s);
         p.push_back(-gap);
@@ -219,7 +219,7 @@ SubCarPulsePlayThread::SubCarPulsePlayThread(std::vector<int32_t> pulses, size_t
 SubCarPulsePlayThread::~SubCarPulsePlayThread() {
     if (thread_) {
         chThdTerminate(thread_);
-        if (thread_->p_refs) chThdWait(thread_);
+        chThdWait(thread_);  // unconditional: reclaims the from-heap thread stack
         thread_ = nullptr;
     }
 }
@@ -293,6 +293,7 @@ void SubCarRecentEntryDetailView::stop_emulate() {
     tx_running = false;
     ready_signal = false;
     button_emulate.set_text("Emulate TX");
+    std::vector<int32_t>().swap(tx_pulses);  // free the pulse buffer
     console.writeln("Emulate: done");
 }
 
