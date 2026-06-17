@@ -20,10 +20,10 @@ index 018fa46c..1ea74242 100644
  	apps/ui_touch_calibration.cpp
 diff --git a/firmware/application/apps/ui_subcar.cpp b/firmware/application/apps/ui_subcar.cpp
 new file mode 100644
-index 00000000..db0ffa56
+index 00000000..2ec72075
 --- /dev/null
 +++ b/firmware/application/apps/ui_subcar.cpp
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,670 @@
 +/*
 + * Copyright (C) 2026 HTotoo
 + *
@@ -247,6 +247,8 @@ index 00000000..db0ffa56
 +            return "Star Line";
 +        case FPC_HONDA_STATIC:
 +            return "Honda Static";
++        case FPC_TOYOTA:
++            return "Toyota";
 +            /* case FPC_KIAV6:
 +                 return "Kia V6";*/
 +
@@ -548,6 +550,14 @@ index 00000000..db0ffa56
 +              (buf[6] << 8) |
 +              buf[7];
 +        btn = to_string_dec_uint(button);
++    }
++
++    if (entry_.sensorType == FPC_TOYOTA) {
++        // [63:32]=hop(rolling)  [31:4]=serial(28)  [3:0]=button ; data2: 0=Corolla433 1=Tundra315
++        serial = (uint32_t)((entry_.data >> 4) & 0x0FFFFFFF);
++        uint8_t button = (uint8_t)(entry_.data & 0x0F);
++        btn = to_string_dec_uint(button);
++        // KeeLoq hop code (no plain counter); model shown via data2
 +    }
 +
 +    if (entry_.sensorType == FPC_FIATV0) {
@@ -1532,7 +1542,7 @@ index 77978b4d..007ee29d 100644
  }
  
 diff --git a/firmware/baseband/CMakeLists.txt b/firmware/baseband/CMakeLists.txt
-index b0b83620..ae10c5b9 100644
+index b0b83620..f595ec38 100644
 --- a/firmware/baseband/CMakeLists.txt
 +++ b/firmware/baseband/CMakeLists.txt
 @@ -326,7 +326,7 @@ set(MODE_FLAGS "-O3")
@@ -1868,7 +1878,8 @@ index b0b83620..ae10c5b9 100644
  ### SubCar Decoders
  
  set(MODE_CPPSRC
- 	proc_subcar.cpp
+-	proc_subcar.cpp
++	proc_subcar_app.cpp
  )
 +set(add_to_firmware TRUE)
  DeclareTargets(PSCD subcar)
@@ -1960,3 +1971,31 @@ index b0b83620..ae10c5b9 100644
  endif()
  
  
+diff --git a/firmware/baseband/baseband_thread.cpp b/firmware/baseband/baseband_thread.cpp
+index 289e214c..04fcb91e 100644
+--- a/firmware/baseband/baseband_thread.cpp
++++ b/firmware/baseband/baseband_thread.cpp
+@@ -39,7 +39,7 @@ using namespace lpc43xx;
+ 
+ static baseband::SGPIO baseband_sgpio;
+ 
+-WORKING_AREA(baseband_thread_wa, 4096);
++WORKING_AREA(baseband_thread_wa, 8192);
+ 
+ Thread* BasebandThread::thread = nullptr;
+ 
+@@ -72,6 +72,14 @@ void BasebandThread::start() {
+     }
+ }
+ 
++void BasebandThread::stop() {
++    if (thread) {
++        chThdTerminate(thread);
++        chThdWait(thread);
++        thread = nullptr;
++    }
++}
++
+ void BasebandThread::set_sampling_rate(uint32_t new_sampling_rate) {
+     sampling_rate_ = new_sampling_rate;
+ }

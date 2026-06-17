@@ -27,11 +27,13 @@ touch "$APPDIR/apps/ui_subcar.cpp" "$APPDIR/apps/ui_subcar.hpp"
 rm -rf "$EXTDIR/subcarrx" 2>/dev/null || true
 
 echo "=== Syncing baseband (proc_subcar + fprotos) ==="
-cp "$SRC_BASEBAND/proc_subcar.cpp" "$SRC_BASEBAND/proc_subcar.hpp" "$BASEBANDDIR/"
+cp "$SRC_BASEBAND/proc_subcar.cpp" "$SRC_BASEBAND/proc_subcar.hpp" \
+   "$SRC_BASEBAND/proc_subcar_app.cpp" "$SRC_BASEBAND/proc_subcar_app.hpp" "$BASEBANDDIR/"
 cp "$SRC_BASEBAND/fprotos/c-"*.hpp "$BASEBANDDIR/fprotos/"
 cp "$SRC_BASEBAND/fprotos/subcarprotos.hpp" "$SRC_BASEBAND/fprotos/subcarbase.hpp" \
    "$SRC_BASEBAND/fprotos/subcartypes.hpp" "$BASEBANDDIR/fprotos/"
-touch "$BASEBANDDIR/proc_subcar.cpp" "$BASEBANDDIR/proc_subcar.hpp"
+touch "$BASEBANDDIR/proc_subcar.cpp" "$BASEBANDDIR/proc_subcar.hpp" \
+      "$BASEBANDDIR/proc_subcar_app.cpp" "$BASEBANDDIR/proc_subcar_app.hpp"
 find "$BASEBANDDIR/fprotos/" -name "*.hpp" -exec touch {} \;
 echo "  baseband synced + timestamps forced"
 
