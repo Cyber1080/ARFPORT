@@ -234,8 +234,12 @@ uint32_t SubCarPulsePlayThread::run() {
     struct BasebandReplay {
         BasebandReplay(ReplayConfig* c) { baseband::replay_start(c); }
     } replay{&config};
-    BufferExchange buffers{&config};
+    // Wait for the M0 StreamOutput ctor to populate config->fifo_buffers_* and
+    // signal FillRequest BEFORE building BufferExchange, otherwise it caches
+    // nullptr FIFO pointers and never delivers buffers (the TXp:-10 empty-stream bug).
     while (!(*ready_sig_) && !chThdShouldTerminate()) chThdSleep(100);
+    if (chThdShouldTerminate()) return TERMINATED;
+    BufferExchange buffers{&config};
     size_t cursor = 0;
     while (!buffers.empty() && !chThdShouldTerminate()) {
         auto buf = buffers.get_prefill();
