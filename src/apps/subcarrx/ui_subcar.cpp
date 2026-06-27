@@ -273,7 +273,7 @@ uint32_t SubCarPulsePlayThread::run() {
 void SubCarRecentEntryDetailView::start_emulate() {
     tx_pulses = build_ford_v0_pulses(entry_.data, (uint16_t)entry_.data2);
     if (tx_pulses.empty()) { console.writeln("Emulate: encode failed"); return; }
-    console.writeln("TX Ford V0 cnt+1 (" + to_string_dec_uint(tx_pulses.size()) + ")");
+    console.writeln("TX Ford V0 cnt+1");
     button_emulate.set_text("Stop TX");
     tx_running = true;
     ready_signal = false;
@@ -307,10 +307,9 @@ void SubCarRecentEntryDetailView::stop_emulate() {
 }
 
 void SubCarRecentEntryDetailView::on_tx_progress(int progress, bool done) {
-    // DIAG: -2 replay cfg, -4 FIFO armed (tx_configured), -10 stream empty, 100 done
-    console.writeln("TXp:" + to_string_dec_int(progress) + (done ? " DONE" : ""));
     // Only stop on the baseband's REAL done (progress 100, after end sentinels).
     // The M4 feed-done arrives as progress 0 and must NOT stop us early (trim).
+    (void)progress;
     if (done && progress == 100 && tx_running) stop_emulate();
 }
 

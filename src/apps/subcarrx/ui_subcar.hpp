@@ -264,7 +264,6 @@ class SubCarRecentEntryDetailView : public View {
     void on_tx_progress(int progress, bool done);
     void set_ready() {
         ready_signal = true;
-        console.writeln("FillReq");  // DIAG: RequestSignal reached app
     }
 
     MessageHandlerRegistration handler_tx_progress{
