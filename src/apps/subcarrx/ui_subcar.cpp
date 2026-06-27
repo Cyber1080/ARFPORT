@@ -202,6 +202,11 @@ static std::vector<int32_t> build_ford_v0_pulses(uint64_t key1, uint16_t key2) {
         }
         p.push_back(-20000);  // inter-frame gap
     }
+    // End sentinels so the baseband plays the whole frame then reports real done
+    // (matches endsignals[1]/[2] in proc_subcar_app). Without these the M4 feed-done
+    // stops the transmitter mid-frame -> trimmed signal.
+    p.push_back(42069);
+    p.push_back(613379);
     return p;
 }
 }  // namespace
@@ -304,7 +309,9 @@ void SubCarRecentEntryDetailView::stop_emulate() {
 void SubCarRecentEntryDetailView::on_tx_progress(int progress, bool done) {
     // DIAG: -2 replay cfg, -4 FIFO armed (tx_configured), -10 stream empty, 100 done
     console.writeln("TXp:" + to_string_dec_int(progress) + (done ? " DONE" : ""));
-    if (done && tx_running) stop_emulate();
+    // Only stop on the baseband's REAL done (progress 100, after end sentinels).
+    // The M4 feed-done arrives as progress 0 and must NOT stop us early (trim).
+    if (done && progress == 100 && tx_running) stop_emulate();
 }
 
 void SubCarView::focus() {
