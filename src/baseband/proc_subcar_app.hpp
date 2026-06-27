@@ -82,6 +82,7 @@ class SubCarAppProcessor : public BasebandProcessor {
     uint32_t deviation_delta = (SUBCAR_APP_FM_DEV * 4294967296ULL) / SUBCAR_APP_TX_FS;
     int32_t  endsignals[3] = {0, 42069, 613379};
     uint8_t  readerrs = 0;
+    int8_t   tx_diag = 0;  // diag: 0=fresh, 1=execute_tx reached read, 2=empty reported once
     std::unique_ptr<StreamOutput> stream{};
     TXProgressMessage txprogress_message{};
     void write_tx_sample(const buffer_c8_t& buffer, bool bit_value, size_t i);

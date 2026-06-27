@@ -197,10 +197,18 @@ void SubCarAppProcessor::execute_tx(const buffer_c8_t& buffer) {
         if (rem_samples <= curr_samples) {
             int32_t sample = -13346;
             rem_samples = 0; curr_samples = 0;
+            if (tx_diag == 0) {  // DIAG: execute_tx reached the read with tx_configured (once)
+                tx_diag = 1;
+                txprogress_message.progress = -11;
+                shared_memory.application_queue.push(txprogress_message);
+            }
             size_t readed = stream->read(&sample, 4);
             if (readed == 0) {
-                txprogress_message.progress = -10;
-                shared_memory.application_queue.push(txprogress_message);
+                if (tx_diag < 2) {  // DIAG: report empty stream only once (no flood)
+                    tx_diag = 2;
+                    txprogress_message.progress = -10;
+                    shared_memory.application_queue.push(txprogress_message);
+                }
             } else {
                 if (sample == endsignals[readerrs + 1]) {
                     readerrs++;
@@ -224,6 +232,8 @@ void SubCarAppProcessor::execute_tx(const buffer_c8_t& buffer) {
 
 void SubCarAppProcessor::configure_replay(const ReplayConfigMessage& msg) {
     if (msg.config) {
+        readerrs = 0;  // reset so repeated emulates work + endsignal index stays in-bounds
+        tx_diag = 0;   // reset diagnostics for this TX
         txprogress_message.progress = -2;
         shared_memory.application_queue.push(txprogress_message);
         stream = std::make_unique<StreamOutput>(msg.config);
