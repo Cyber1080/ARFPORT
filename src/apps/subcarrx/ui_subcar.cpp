@@ -74,10 +74,10 @@ SubCarRecentEntryDetailView::SubCarRecentEntryDetailView(NavigationView& nav, co
     };
     button_emulate.on_select = [this](const ui::Button&) {
         if (tx_running) { stop_emulate(); return; }
-        if (entry_.sensorType == FPC_FORDV0) {
+        if (entry_.sensorType == FPC_FORDV0 || entry_.sensorType == FPC_KIAV5) {
             start_emulate();
         } else {
-            console.writeln("Emulate: Ford V0 only (for now)");
+            console.writeln("Emulate: Ford V0 / Kia V5 only");
         }
     };
     update_data();
@@ -209,6 +209,130 @@ static std::vector<int32_t> build_ford_v0_pulses(uint64_t key1, uint16_t key2) {
     p.push_back(613379);
     return p;
 }
+
+// ── Kia V5 (custom mixer cipher; 2FSK 433.92, Manchester 400/800) ─────────────
+// Ported from Flipper-ARF/ProtoPirate kia_v5.c. Counter-sync: decode counter,
+// +1, re-encrypt, rebuild the 64-bit frame + 2-bit CRC, Manchester-modulate.
+static const uint8_t kia_v5_key[8] = {0x53, 0x54, 0x46, 0x52, 0x4b, 0x45, 0x30, 0x30};
+
+static uint64_t kia_bit_reverse_64(uint64_t input) {
+    uint64_t output = 0;
+    for (int i = 0; i < 8; i++) {
+        uint8_t byte = (input >> (i * 8)) & 0xFF, rev = 0;
+        for (int b = 0; b < 8; b++)
+            if (byte & (1 << b)) rev |= (1 << (7 - b));
+        output |= ((uint64_t)rev << ((7 - i) * 8));
+    }
+    return output;
+}
+
+static uint8_t kia_v5_calc_crc(uint64_t data) {
+    uint8_t crc = 0;
+    for (int i = 63; i >= 0; i--) {
+        const uint8_t bit = (data >> i) & 1U;
+        const uint8_t shifted_out = (crc >> 1U) & 1U;
+        crc = (uint8_t)(((crc & 1U) << 1U) | bit);
+        if (shifted_out) crc ^= 3U;
+    }
+    return (uint8_t)(crc & 3U);
+}
+
+static uint16_t kia_v5_mixer_decode(uint32_t encrypted) {
+    uint8_t s0 = encrypted & 0xFF, s1 = (encrypted >> 8) & 0xFF;
+    uint8_t s2 = (encrypted >> 16) & 0xFF, s3 = (encrypted >> 24) & 0xFF;
+    int ri = 1;
+    for (size_t i = 0; i < 18; i++) {
+        uint8_t r = kia_v5_key[ri] & 0xFF;
+        int steps = 8;
+        while (steps > 0) {
+            uint8_t base;
+            if ((s3 & 0x40) == 0) base = (s3 & 0x02) == 0 ? 0x74 : 0x2E;
+            else base = (s3 & 0x02) == 0 ? 0x3A : 0x5C;
+            if (s2 & 0x08) base = (((base >> 4) & 0x0F) | ((base & 0x0F) << 4)) & 0xFF;
+            if (s1 & 0x01) base = ((base & 0x3F) << 2) & 0xFF;
+            if (s0 & 0x01) base = (base << 1) & 0xFF;
+            uint8_t temp = (s3 ^ s1) & 0xFF;
+            s3 = ((s3 & 0x7F) << 1) & 0xFF; if (s2 & 0x80) s3 |= 0x01;
+            s2 = ((s2 & 0x7F) << 1) & 0xFF; if (s1 & 0x80) s2 |= 0x01;
+            s1 = ((s1 & 0x7F) << 1) & 0xFF; if (s0 & 0x80) s1 |= 0x01;
+            s0 = ((s0 & 0x7F) << 1) & 0xFF;
+            uint8_t chk = (base ^ (r ^ temp)) & 0xFF; if (chk & 0x80) s0 |= 0x01;
+            r = ((r & 0x7F) << 1) & 0xFF;
+            steps--;
+        }
+        ri = (ri - 1) & 0x7;
+    }
+    return (s0 + (s1 << 8)) & 0xFFFF;
+}
+
+static uint32_t kia_v5_mixer_encode(uint32_t serial, uint16_t counter, uint8_t button) {
+    uint8_t s0 = (uint8_t)(((serial >> 8) & 0x0FU) | ((button & 0x0FU) << 4));
+    uint8_t s1 = (uint8_t)((counter >> 8) & 0xFFU);
+    uint8_t s2 = (uint8_t)(serial & 0xFFU);
+    uint8_t s3 = (uint8_t)(counter & 0xFFU);
+    int ks_idx = 0;
+    for (int round_i = 0; round_i < 18; round_i++) {
+        uint8_t r = kia_v5_key[ks_idx] & 0xFFU;
+        ks_idx = (ks_idx + 1) & 0x07;
+        uint8_t running_d = s3;
+        for (int step = 0; step < 8; step++) {
+            uint8_t base;
+            if ((s0 & 0x80U) == 0) base = (s0 & 0x04U) == 0 ? 0x74U : 0x2EU;
+            else base = (s0 & 0x04U) == 0 ? 0x3AU : 0x5CU;
+            if (s2 & 0x10U) base = (uint8_t)(((base >> 4) & 0x0FU) | ((base & 0x0FU) << 4));
+            if (s1 & 0x02U) base = (uint8_t)((base & 0x3FU) << 2);
+            uint8_t base_final = base;
+            if (running_d & 0x02U) base_final = (uint8_t)((base & 0x7FU) << 1);
+            const bool carry_b = (s1 & 0x01U) != 0;
+            const bool carry_c = (s2 & 0x01U) != 0;
+            const bool carry_a = (s0 & 0x01U) != 0;
+            uint8_t new_d = (uint8_t)(running_d >> 1); if (carry_b) new_d |= 0x80U;
+            running_d ^= s2;
+            s1 = (uint8_t)(s1 >> 1); if (carry_c) s1 |= 0x80U;
+            s2 = (uint8_t)(s2 >> 1); if (carry_a) s2 |= 0x80U;
+            const uint8_t feedback = (uint8_t)(((running_d ^ r) << 7) ^ base_final);
+            s0 = (uint8_t)(s0 >> 1); if (feedback & 0x80U) s0 |= 0x80U;
+            r = (uint8_t)(r >> 1);
+            running_d = new_d;
+        }
+        s3 = running_d;
+    }
+    return ((uint32_t)s0 << 24) | ((uint32_t)s2 << 16) | ((uint32_t)s1 << 8) | (uint32_t)s3;
+}
+
+// Build the counter+1 Kia V5 frame as a signed-us Manchester pulse stream.
+// frame64_orig = entry_.data2 (the stored 64-bit frame from the decoder).
+static std::vector<int32_t> build_kia_v5_pulses(uint64_t frame64_orig) {
+    uint64_t yek = kia_bit_reverse_64(frame64_orig);
+    uint32_t serial = (uint32_t)((yek >> 32) & 0x0FFFFFFF);
+    uint8_t button = (uint8_t)((yek >> 60) & 0x0F);
+    uint32_t enc = (uint32_t)(yek & 0xFFFFFFFF);
+    uint16_t cnt = (uint16_t)((kia_v5_mixer_decode(enc) + 1) & 0xFFFF);
+    uint32_t enc2 = kia_v5_mixer_encode(serial, cnt, button);
+    uint64_t yek2 = (yek & 0xFFFFFFFF00000000ULL) | enc2;
+    uint64_t frame = kia_bit_reverse_64(yek2);
+    uint8_t crc = kia_v5_calc_crc(frame);
+
+    const int32_t s = 400, l = 800;
+    std::vector<int32_t> p;
+    p.reserve(8 * 320);
+    for (int rep = 0; rep < 8; rep++) {
+        for (int i = 0; i < 80; i++) { p.push_back(+s); p.push_back(-s); }  // preamble
+        p.push_back(-s); p.push_back(+l); p.push_back(-s); p.push_back(+s);  // sync + align
+        for (int b = 63; b >= 0; b--) {                                     // 64 data bits MSB-first
+            if ((frame >> b) & 1ULL) { p.push_back(-s); p.push_back(+s); }
+            else { p.push_back(+s); p.push_back(-s); }
+        }
+        p.push_back(+s); p.push_back(-s);                                    // separator
+        if ((crc >> 1) & 1) { p.push_back(-s); p.push_back(+s); } else { p.push_back(+s); p.push_back(-s); }
+        if (crc & 1)        { p.push_back(-s); p.push_back(+s); } else { p.push_back(+s); p.push_back(-s); }
+        p.push_back(-s); p.push_back(+s);                                    // end marker
+        p.push_back(-20000);                                                 // inter-frame gap
+    }
+    p.push_back(42069);
+    p.push_back(613379);
+    return p;
+}
 }  // namespace
 
 // ── SubCarPulsePlayThread (streams pulse vector to ARFC TX baseband) ──────────
@@ -271,9 +395,19 @@ uint32_t SubCarPulsePlayThread::run() {
 
 // ── Emulate (counter-sync TX) ────────────────────────────────────────────────
 void SubCarRecentEntryDetailView::start_emulate() {
-    tx_pulses = build_ford_v0_pulses(entry_.data, (uint16_t)entry_.data2);
-    if (tx_pulses.empty()) { console.writeln("Emulate: encode failed"); return; }
-    console.writeln("TX Ford V0 cnt+1");
+    uint32_t tx_deviation = SUBCAR_TX_DEVIATION;
+    uint8_t tx_mode = 0;  // 0 = OOK/AM, 1 = 2FSK/FM
+    if (entry_.sensorType == FPC_KIAV5) {
+        tx_pulses = build_kia_v5_pulses(entry_.data2);
+        tx_mode = 1;               // Kia V5 is 2FSK
+        tx_deviation = 47600;      // ~Dev476 (Kia/Hyundai); tune to 433.92 in RX first
+        if (tx_pulses.empty()) { console.writeln("Emulate: encode failed"); return; }
+        console.writeln("TX Kia V5 cnt+1");
+    } else {
+        tx_pulses = build_ford_v0_pulses(entry_.data, (uint16_t)entry_.data2);
+        if (tx_pulses.empty()) { console.writeln("Emulate: encode failed"); return; }
+        console.writeln("TX Ford V0 cnt+1");
+    }
     button_emulate.set_text("Stop TX");
     tx_running = true;
     ready_signal = false;
@@ -285,7 +419,7 @@ void SubCarRecentEntryDetailView::start_emulate() {
     transmitter_model.set_rf_amp(true);
     transmitter_model.set_tx_gain(35);
     transmitter_model.enable();
-    baseband::set_bitstream_config(SUBCAR_TX_DEVIATION, 0);  // 0 = OOK/AM
+    baseband::set_bitstream_config(tx_deviation, tx_mode);
     auto done_cb = [](uint32_t) {
         TXProgressMessage m{};
         m.done = true;
